@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
@@ -415,6 +416,9 @@ func Boot(ctx context.Context, options Options) error {
 		return fmt.Errorf("等待系统启动完成失败: %w", err)
 	}
 	logService(options, "INFO", "module.boot", "ready", "Android 启动完成")
+	var compatibility sync.WaitGroup
+	compatibility.Go(func() { RepairGoogleConnectivity(ctx, options, time.Minute) })
+	defer compatibility.Wait()
 	if err := traffic.RestoreSystemTrust(ctx, paths.New(options.ModuleDir)); err != nil {
 		logService(options, "WARN", "traffic.trust", "failed", "抓包 CA 未完成系统挂载: %v", err)
 	}

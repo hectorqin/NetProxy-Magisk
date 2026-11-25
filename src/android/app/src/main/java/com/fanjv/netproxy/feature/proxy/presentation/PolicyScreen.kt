@@ -319,8 +319,8 @@ internal fun PolicyScreen(
                                     latency = state.nodeLatency[member.tag].takeIf {
                                         state.live && state.nodeLatencyIdentity == state.snapshot?.coreIdentity
                                     } ?: member.delay.takeIf { state.live && it > 0 }?.toString(),
-                                    selected = !state.stale && group.selected == member.tag,
-                                    enabled = state.live && group.selectable && member.runtimeAvailable && !state.operating,
+                                    selected = state.selectedMember(group) == member.tag,
+                                    enabled = state.canSelect(group, member),
                                     itemSize = cardSize,
                                     onClick = { viewModel.select(group.tag, member.tag) },
                                     onLongClick = if (!state.stale && !state.operating && member.type.isNotBlank() &&
