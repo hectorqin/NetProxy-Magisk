@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,6 +55,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -63,7 +65,9 @@ import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.ui.component.ContentStatus
 import com.fanjv.netproxy.core.ui.component.TopBarMenuAction
 import com.fanjv.netproxy.core.ui.component.TopBarMoreMenu
+import com.fanjv.netproxy.feature.apps.data.AndroidApp
 import com.fanjv.netproxy.feature.apps.data.AppIconCache
+import com.fanjv.netproxy.feature.traffic.data.CaptureRecord
 import com.fanjv.netproxy.feature.traffic.data.CapturedBody
 import com.fanjv.netproxy.feature.traffic.data.CapturedMessage
 import com.fanjv.netproxy.feature.traffic.data.RewriteMatch
@@ -153,21 +157,9 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                                     if (exit.chain.isNotEmpty()) InspectRow(stringResource(R.string.traffic_exit_chain),
                                         exit.chain.joinToString(" → ") { "${it.tag} (${it.type})" })
                                     exit.remote?.let { InspectRow(stringResource(R.string.traffic_remote), it) }
-                                    exit.packageName?.let { name ->
-                                        val app = selection.app
-                                        if (app == null) InspectRow(stringResource(R.string.traffic_app), name)
-                                        else Row(verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            val bitmap = remember(app.iconKey, AppIconCache.revision) {
-                                                AppIconCache.cachedIcon(app.iconKey)
-                                            }
-                                            bitmap?.let { Image(it, null, Modifier.size(32.dp).clip(RoundedCornerShape(8.dp))) }
-                                            InspectRow(stringResource(R.string.traffic_app), "${app.label}\n$name")
-                                        }
-                                    }
-                                    exit.uid?.let { InspectRow("UID", it.toString()) }
-                                    exit.process?.let { InspectRow(stringResource(R.string.traffic_process), it) }
                                 }
+                                InspectSourceApp(record, selection.app)
+                                record.exit?.process?.let { InspectRow(stringResource(R.string.traffic_process), it) }
                                 InspectRow(stringResource(R.string.traffic_rewrite_result), when {
                                     record.rewritten -> stringResource(R.string.traffic_rewritten)
                                     record.rewrite != null -> stringResource(R.string.traffic_rule_unchanged)
@@ -205,6 +197,26 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun InspectSourceApp(record: CaptureRecord, app: AndroidApp?) {
+    (record.sourceApp?.packageName ?: record.exit?.packageName)?.let { packageName ->
+        val bitmap = app?.let {
+            remember(it.iconKey, AppIconCache.revision) { AppIconCache.cachedIcon(it.iconKey) }
+        }
+        val appText = if (app == null || app.label == packageName) packageName else "${app.label}\n$packageName"
+        InspectRow(stringResource(R.string.traffic_app), appText) {
+            bitmap?.let {
+                Image(it, null, Modifier.align(Alignment.CenterVertically).padding(start = 6.dp)
+                    .size(36.dp).clip(RoundedCornerShape(9.dp)))
+            }
+        }
+    }
+    (record.sourceApp?.uid ?: record.exit?.uid)?.let { InspectRow("UID", it.toString()) }
+    record.sourceApp?.userId?.let {
+        InspectRow(stringResource(R.string.traffic_app_user), it.toString())
     }
 }
 
@@ -371,11 +383,19 @@ private fun InspectCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun InspectRow(key: String, value: String, modifier: Modifier = Modifier, monospace: Boolean = false) {
+private fun InspectRow(
+    key: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    monospace: Boolean = false,
+    trailing: @Composable RowScope.() -> Unit = {},
+) {
     val style = MiuixTheme.textStyles.footnote1.copy(lineHeight = 16.sp)
-    Row(modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(key, Modifier.weight(0.40f), style = style, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-        Text(value, Modifier.weight(0.60f), style = if (monospace) style.copy(fontFamily = FontFamily.Monospace) else style)
+    Row(modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(key, Modifier.fillMaxWidth(0.40f), style = style, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        Text(value, Modifier.weight(1f), textAlign = TextAlign.Start,
+            style = if (monospace) style.copy(fontFamily = FontFamily.Monospace) else style)
+        trailing()
     }
 }
 
