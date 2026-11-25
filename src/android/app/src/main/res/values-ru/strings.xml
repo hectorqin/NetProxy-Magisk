@@ -773,4 +773,12 @@
     <string name="traffic_rule_redirect">Адрес перенаправления</string>
     <string name="traffic_rule_unavailable">Исходное правило изменено или удалено.</string>
     <string name="traffic_header_copy_hint">Нажмите на заголовок, чтобы скопировать его.</string>
+    <string name="policy_node_add_to_groups">Добавить в группы политик…</string>
+    <string name="policy_node_added">Узел добавлен в выбранные группы</string>
+    <string name="policy_node_already_added">Узел уже входит в выбранные группы</string>
+    <string name="policy_group_provider_nodes">Узлы поставщика</string>
+    <string name="policy_provider_entire">Весь поставщик (включая новые узлы)</string>
+    <string name="policy_provider_selected">Только выбранные узлы</string>
+    <string name="policy_provider_nodes_unavailable">Список узлов этого поставщика недоступен</string>
+    <string name="policy_provider_regex_conflict">Текущие правила включения и исключения нельзя безопасно изменить автоматически. Проверьте расширенные фильтры.</string>
 </resources>

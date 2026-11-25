@@ -773,4 +773,12 @@
     <string name="traffic_rule_redirect">Destino do redirecionamento</string>
     <string name="traffic_rule_unavailable">A regra original foi alterada ou removida.</string>
     <string name="traffic_header_copy_hint">Toque em um cabeçalho para copiá-lo.</string>
+    <string name="policy_node_add_to_groups">Adicionar a grupos de política…</string>
+    <string name="policy_node_added">Nó adicionado aos grupos selecionados</string>
+    <string name="policy_node_already_added">O nó já pertence aos grupos selecionados</string>
+    <string name="policy_group_provider_nodes">Nós do provedor</string>
+    <string name="policy_provider_entire">Provedor inteiro (inclui novos nós automaticamente)</string>
+    <string name="policy_provider_selected">Apenas nós selecionados</string>
+    <string name="policy_provider_nodes_unavailable">Lista de nós indisponível para este provedor</string>
+    <string name="policy_provider_regex_conflict">As regras de inclusão/exclusão existentes impedem uma alteração automática segura. Revise os filtros avançados.</string>
 </resources>
