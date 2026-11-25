@@ -793,4 +793,6 @@
     <string name="traffic_capture_apps">Apps para captura</string>
     <string name="traffic_capture_apps_summary">Escolha os apps para captura. Sem seleção, todos os apps são capturados.</string>
     <string name="traffic_app_user">Usuário do Android</string>
+    <string name="traffic_disable_quic">Desativar QUIC durante a captura</string>
+    <string name="traffic_disable_quic_summary">Rejeita UDP na porta 443 para que os apps capturados possam usar TCP.</string>
 </resources>

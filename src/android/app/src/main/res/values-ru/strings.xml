@@ -793,4 +793,6 @@
     <string name="traffic_capture_apps">Приложения для перехвата</string>
     <string name="traffic_capture_apps_summary">Выберите приложения для перехвата. Если ничего не выбрано, перехватываются все приложения.</string>
     <string name="traffic_app_user">Пользователь Android</string>
+    <string name="traffic_disable_quic">Отключать QUIC при перехвате</string>
+    <string name="traffic_disable_quic_summary">Отклоняет UDP на порту 443, чтобы приложения могли переключиться на TCP.</string>
 </resources>
