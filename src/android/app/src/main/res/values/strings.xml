@@ -781,4 +781,6 @@
     <string name="policy_provider_selected">Only selected nodes</string>
     <string name="policy_provider_nodes_unavailable">Node list unavailable for this provider</string>
     <string name="policy_provider_regex_conflict">Existing include/exclude rules prevent a safe automatic change. Review the advanced filters.</string>
+    <string name="inbound_ipv6">IPv6</string>
+    <string name="inbound_ipv6_hint">Turn off to use IPv4 only for managed traffic.</string>
 </resources>
