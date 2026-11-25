@@ -783,4 +783,7 @@
     <string name="policy_provider_regex_conflict">Текущие правила включения и исключения нельзя безопасно изменить автоматически. Проверьте расширенные фильтры.</string>
     <string name="inbound_ipv6">IPv6</string>
     <string name="inbound_ipv6_hint">Отключите, чтобы управляемый трафик использовал только IPv4.</string>
+    <string name="traffic_capture_apps">Приложения для перехвата</string>
+    <string name="traffic_capture_apps_summary">Выберите приложения для перехвата. Если ничего не выбрано, перехватываются все приложения.</string>
+    <string name="traffic_app_user">Пользователь Android</string>
 </resources>

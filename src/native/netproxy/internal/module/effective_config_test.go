@@ -78,14 +78,18 @@ func TestIPv4OnlyRuntimeKeepsUserDNSAndRouteOnDisk(t *testing.T) {
 			Rules    []map[string]jsontext.Value `json:"rules"`
 		} `json:"dns"`
 		Route struct {
-			Capture string                      `json:"netproxy_capture_socket"`
-			Rules   []map[string]jsontext.Value `json:"rules"`
+			Capture     string                      `json:"netproxy_capture_socket"`
+			FindProcess bool                        `json:"find_process"`
+			Rules       []map[string]jsontext.Value `json:"rules"`
 		} `json:"route"`
 	}
 	if err := json.Unmarshal(raw, &projected); err != nil {
 		t.Fatal(err)
 	}
 	dns, route := projected.DNS, projected.Route
+	if !route.FindProcess {
+		t.Fatal("capture must enable process owner lookup")
+	}
 	if dns.Strategy != "ipv4_only" || len(dns.Rules) != 2 {
 		t.Fatalf("unexpected DNS: %s", raw)
 	}
