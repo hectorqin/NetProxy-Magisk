@@ -3,6 +3,7 @@ package module
 import (
 	"context"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 )
 
@@ -26,6 +27,10 @@ func RequestPolicyDelay(ctx context.Context, options Options, target service.Pol
 	}
 	defer release()
 	return service.RequestPolicyDelay(ctx, networkControlOptions(options), target)
+}
+
+func TestNodeLatency(ctx context.Context, options Options, target service.NodeLatencyTarget) (service.NodeLatency, error) {
+	return service.TestNodeLatency(ctx, networkControlOptions(options), paths.RuntimeConfig(options.RuntimeDir), target)
 }
 
 func lockPolicyOperation(ctx context.Context, options Options) (func(), error) {
