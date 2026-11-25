@@ -20,6 +20,16 @@ test('HTTP API 帮助、补全与预览不伪造可用服务或真实凭据', ()
   assert.equal(decodeCtlResult(mockCtl(['api', 'status'])).data.state, 'unavailable')
 })
 
+test('透明抓包帮助、补全与预览只提供只读状态', () => {
+  assert.deepEqual(complete('api tr').candidates, ['traffic'])
+  assert.deepEqual(complete('api traffic se').candidates, ['set-rules'])
+  assert.match(COMMANDS.api.help, /受管透明入站/)
+  assert.deepEqual(decodeCtlResult(mockCtl(['api', 'traffic', 'list'])).data, [])
+  assert.deepEqual(decodeCtlResult(mockCtl(['api', 'traffic', 'rules'])).data, { rules: [] })
+  assert.deepEqual(complete('api traffic to').candidates, ['toggle'])
+  assert.equal(decodeCtlResult(mockCtl(['api', 'traffic', 'toggle'])).ok, false)
+})
+
 test('构建检查拒绝缺失或空的页面资源及运行时角色帧', t => {
   const root = mkdtempSync(join(tmpdir(), 'netproxy-webui-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
