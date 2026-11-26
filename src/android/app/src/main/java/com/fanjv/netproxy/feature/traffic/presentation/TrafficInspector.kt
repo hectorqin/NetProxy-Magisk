@@ -73,7 +73,9 @@ import com.fanjv.netproxy.feature.apps.data.AndroidApp
 import com.fanjv.netproxy.feature.apps.data.AppIconCache
 import com.fanjv.netproxy.feature.traffic.data.CaptureRecord
 import com.fanjv.netproxy.feature.traffic.data.CapturedBody
-import com.fanjv.netproxy.feature.traffic.data.CapturedMessage
+import com.fanjv.netproxy.feature.traffic.data.GrpcDetail
+import com.fanjv.netproxy.feature.traffic.data.ProtoField
+import com.fanjv.netproxy.feature.traffic.data.WebSocketFrame
 import com.fanjv.netproxy.feature.traffic.data.RewriteMatch
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route
@@ -148,6 +150,15 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (tab == 0) {
                             detail?.websocket?.let { websocket ->
+                                if (websocket.messages.isNotEmpty() || websocket.messagesTruncated) {
+                                    item {
+                                        InspectCard {
+                                            Text(stringResource(R.string.traffic_ws_messages), style = MiuixTheme.textStyles.subtitle)
+                                            if (websocket.messagesTruncated) TruncatedNotice()
+                                        }
+                                    }
+                                    items(websocket.messages.size) { index -> WebSocketItem(websocket.messages[index]) }
+                                }
                                 item {
                                     InspectCard {
                                         Text(stringResource(R.string.traffic_ws_frames), style = MiuixTheme.textStyles.subtitle)
@@ -155,13 +166,7 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                                     }
                                 }
                                 items(websocket.frames.size) { index ->
-                                    val frame = websocket.frames[index]
-                                    InspectCard {
-                                        val direction = stringResource(if (frame.direction == "send") R.string.traffic_ws_sent else R.string.traffic_ws_received)
-                                        InspectRow(direction, "0x${frame.opcode.toString(16)} · ${frame.size} B")
-                                        frame.text?.let { CodeText(it) }
-                                        if (frame.truncated) TruncatedNotice()
-                                    }
+                                    WebSocketItem(websocket.frames[index])
                                 }
                             }
                             detail?.let { item {
@@ -178,8 +183,17 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                                     InspectRow(stringResource(R.string.traffic_time), record.time)
                                     InspectRow(stringResource(R.string.traffic_duration), stringResource(R.string.traffic_milliseconds, record.durationMs))
                                     InspectRow(stringResource(R.string.traffic_tls), tlsLabel(record.tls))
+                                    record.protocol?.let { InspectRow(stringResource(R.string.traffic_protocol), it) }
+                                    record.sequence?.let { InspectRow(stringResource(R.string.traffic_connection_sequence), it.toString()) }
                                     record.passthroughReason?.let {
-                                        InspectRow(stringResource(R.string.traffic_skip_reason), passthroughLabel(it))
+                                        InspectRow(stringResource(R.string.traffic_connection_reason), passthroughLabel(it))
+                                        if (it == "certificate_rejected" || it == "client_ca_untrusted" || it == "certificate_bypassed") {
+                                            record.caStores?.let { stores ->
+                                                InspectRow(stringResource(R.string.traffic_ca_user_store), caStoreLabel(stores.user))
+                                                InspectRow(stringResource(R.string.traffic_ca_system_store), caStoreLabel(stores.system))
+                                            }
+                                            Text(stringResource(R.string.traffic_ca_retry_hint), style = MiuixTheme.textStyles.body2)
+                                        }
                                     }
                                     InspectRow(stringResource(R.string.traffic_inbound), record.exit?.inbound ?: "netproxy-in")
                                     InspectRow(stringResource(R.string.traffic_outbound), record.outbound)
@@ -204,8 +218,18 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
                             detail == null -> item { Text(stringResource(R.string.traffic_metadata_only)) }
                             message != null -> {
                                 item {
-                                    MessageHeaders(message) { name, value -> headerName = name; headerValue = value }
+                                    MessageHeaders(stringResource(R.string.traffic_headers), message.headers, message.headersTruncated) { name, value ->
+                                        headerName = name; headerValue = value
+                                    }
                                 }
+                                if (message.trailers.isNotEmpty() || message.trailersTruncated) {
+                                    item {
+                                        MessageHeaders(stringResource(R.string.traffic_trailers), message.trailers, message.trailersTruncated) { name, value ->
+                                            headerName = name; headerValue = value
+                                        }
+                                    }
+                                }
+                                message.grpc?.let { grpc -> item { GrpcCard(grpc) } }
                                 body?.let {
                                     if (it.format == "binary" || it.blob) {
                                         item("media-$tab") { TrafficMedia(id, if (tab == 1) "request" else "response", it, viewModel) }
@@ -234,6 +258,13 @@ internal fun TrafficInspectorScreen(id: String, viewModel: TrafficViewModel) {
         }
     }
 }
+
+@Composable
+private fun caStoreLabel(state: String): String = stringResource(when (state) {
+    "present" -> R.string.traffic_ca_store_present
+    "absent" -> R.string.traffic_ca_store_absent
+    else -> R.string.traffic_ca_store_unknown
+})
 
 @Composable
 private fun InspectSourceApp(record: CaptureRecord, app: AndroidApp?) {
@@ -288,11 +319,49 @@ private fun InspectorTabs(tabs: List<String>, selected: Int, select: (Int) -> Un
 }
 
 @Composable
-private fun MessageHeaders(message: CapturedMessage, onHeader: (String, String) -> Unit) {
+private fun WebSocketItem(frame: WebSocketFrame) {
+    InspectCard {
+        val direction = stringResource(if (frame.direction == "send") R.string.traffic_ws_sent else R.string.traffic_ws_received)
+        val compressed = if (frame.compressed) " · " + stringResource(R.string.traffic_compressed) else ""
+        InspectRow(direction, "0x${frame.opcode.toString(16)} · ${frame.size} B$compressed")
+        frame.closeCode?.let { InspectRow(stringResource(R.string.traffic_ws_close_code), it.toString()) }
+        frame.text?.let { CodeText(it) }
+        if (frame.truncated) TruncatedNotice()
+    }
+}
+
+@Composable
+private fun GrpcCard(grpc: GrpcDetail) {
+    InspectCard {
+        Text("gRPC · Protobuf", style = MiuixTheme.textStyles.subtitle)
+        grpc.status?.let { InspectRow("grpc-status", it) }
+        grpc.message?.let { InspectRow("grpc-message", it) }
+        grpc.messages.forEachIndexed { index, message ->
+            val compressed = if (message.compressed) " · " + stringResource(R.string.traffic_compressed) else ""
+            InspectRow(stringResource(R.string.traffic_grpc_message, index + 1), "${message.size} B$compressed")
+            ProtoFields(message.fields)
+            if (message.truncated) TruncatedNotice()
+        }
+        if (grpc.truncated) TruncatedNotice()
+    }
+}
+
+@Composable
+private fun ProtoFields(fields: List<ProtoField>, depth: Int = 0) {
+    fields.forEach { field ->
+        val label = "#${field.number} · wire ${field.wire}"
+        Row(Modifier.padding(start = (depth * 12).dp)) {
+            InspectRow(label, field.value ?: "—", monospace = true)
+        }
+        ProtoFields(field.fields, depth + 1)
+    }
+}
+
+@Composable
+private fun MessageHeaders(headersTitle: String, headers: Map<String, List<String>>, truncated: Boolean, onHeader: (String, String) -> Unit) {
     val context = LocalContext.current
-    val headersTitle = stringResource(R.string.traffic_headers)
     val copyHeaders = stringResource(R.string.traffic_copy_field, headersTitle)
-    val fields = remember(message.headers) { message.headers.toSortedMap(String.CASE_INSENSITIVE_ORDER) }
+    val fields = remember(headers) { headers.toSortedMap(String.CASE_INSENSITIVE_ORDER) }
     InspectCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(headersTitle, Modifier.weight(1f), style = MiuixTheme.textStyles.subtitle)
@@ -308,7 +377,7 @@ private fun MessageHeaders(message: CapturedMessage, onHeader: (String, String) 
                 onClickLabel = stringResource(R.string.traffic_header_copy),
             ) { onHeader(key, it) })
         } }
-        if (message.headersTruncated) TruncatedNotice()
+        if (truncated) TruncatedNotice()
     }
 }
 

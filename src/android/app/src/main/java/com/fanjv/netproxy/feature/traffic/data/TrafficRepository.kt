@@ -44,6 +44,14 @@ internal data class PinnedBypass(
 )
 
 @Serializable
+internal data class AlpnBypass(
+    val host: String,
+    @SerialName("user_id") val userId: Int,
+    @SerialName("package") val packageName: String,
+    @SerialName("expires_at") val expiresAt: String,
+)
+
+@Serializable
 internal data class CaptureRecord(
     val time: String,
     val method: String,
@@ -53,13 +61,19 @@ internal data class CaptureRecord(
     val rewrite: String? = null,
     val tls: String? = null,
     @SerialName("passthrough_reason") val passthroughReason: String? = null,
+    @SerialName("ca_stores") val caStores: CaptureCaStores? = null,
     @SerialName("duration_ms") val durationMs: Long,
     val id: String? = null,
     val target: String? = null,
     val rewritten: Boolean = false,
     val exit: CaptureExit? = null,
     @SerialName("source_app") val sourceApp: CaptureSourceApp? = null,
+    val protocol: String? = null,
+    val sequence: Long? = null,
 )
+
+@Serializable
+internal data class CaptureCaStores(val user: String, val system: String)
 
 @Serializable
 internal data class CaptureSourceApp(
@@ -117,10 +131,23 @@ internal data class CapturedHttp(
 )
 
 @Serializable
-internal data class WebSocketDetail(val frames: List<WebSocketFrame>, val truncated: Boolean)
+internal data class WebSocketDetail(
+    val frames: List<WebSocketFrame>,
+    val truncated: Boolean,
+    val messages: List<WebSocketFrame> = emptyList(),
+    @SerialName("messages_truncated") val messagesTruncated: Boolean = false,
+)
 
 @Serializable
-internal data class WebSocketFrame(val direction: String, val opcode: Int, val size: Long, val text: String? = null, val truncated: Boolean)
+internal data class WebSocketFrame(
+    val direction: String,
+    val opcode: Int,
+    val size: Long,
+    val text: String? = null,
+    val truncated: Boolean,
+    @SerialName("close_code") val closeCode: Int? = null,
+    val compressed: Boolean = false,
+)
 
 @Serializable
 internal data class RewriteMatch(
@@ -154,8 +181,34 @@ internal data class CapturedMessage(
     val headers: Map<String, List<String>>,
     @SerialName("headers_truncated") val headersTruncated: Boolean,
     val body: CapturedBody,
+    val trailers: Map<String, List<String>> = emptyMap(),
+    @SerialName("trailers_truncated") val trailersTruncated: Boolean = false,
+    val grpc: GrpcDetail? = null,
 )
 
+@Serializable
+internal data class GrpcDetail(
+    val messages: List<GrpcMessage>,
+    val truncated: Boolean = false,
+    val status: String? = null,
+    val message: String? = null,
+)
+
+@Serializable
+internal data class GrpcMessage(
+    val size: Long,
+    val compressed: Boolean = false,
+    val truncated: Boolean = false,
+    val fields: List<ProtoField> = emptyList(),
+)
+
+@Serializable
+internal data class ProtoField(
+    val number: Int,
+    val wire: Int,
+    val value: String? = null,
+    val fields: List<ProtoField> = emptyList(),
+)
 @Serializable
 internal data class CapturedBody(
     val data: String,
@@ -243,6 +296,8 @@ internal class TrafficRepository(private val api: ModuleApiClient, private val c
     suspend fun policy(): MitmPolicy = api.read("/traffic/mitm")
     suspend fun pinned(): List<PinnedBypass> = api.read("/traffic/pinned")
     suspend fun clearPinned(): List<PinnedBypass> = api.json.decodeFromJsonElement(api.delete("/traffic/pinned").data)
+    suspend fun alpnBypasses(): List<AlpnBypass> = api.read("/traffic/alpn-bypasses")
+    suspend fun clearAlpnBypasses(): List<AlpnBypass> = api.json.decodeFromJsonElement(api.delete("/traffic/alpn-bypasses").data)
     suspend fun apps(): CaptureApps = api.captureApps()
     suspend fun saveApps(policy: CaptureApps): CaptureApps = api.json.decodeFromJsonElement(
         api.saveCaptureApps(api.json.encodeToJsonElement(policy.copy(apps = emptyList(), mode = policy.effectiveMode)).jsonObject).data,

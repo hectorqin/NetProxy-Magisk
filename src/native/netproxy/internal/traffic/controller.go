@@ -34,7 +34,10 @@ type Entry struct {
 	Exit              *Exit      `json:"exit,omitempty"`
 	SourceApp         *SourceApp `json:"source_app,omitempty"`
 	TLS               string     `json:"tls,omitempty"`
+	Protocol          string     `json:"protocol,omitempty"`
+	Sequence          uint64     `json:"sequence,omitempty"`
 	PassthroughReason string     `json:"passthrough_reason,omitempty"`
+	CAStores          *CAStores  `json:"ca_stores,omitempty"`
 	DurationMS        int64      `json:"duration_ms"`
 }
 
@@ -65,6 +68,7 @@ type Controller struct {
 	appMode       string
 	owners        androidOwners
 	pinned        []PinnedBypass
+	alpn          []ALPNBypass
 	history       *historyStore
 	batch         *savedBatch
 	writer        *historyWriter

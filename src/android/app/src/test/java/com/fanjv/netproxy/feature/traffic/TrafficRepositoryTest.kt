@@ -21,6 +21,16 @@ import org.junit.rules.TemporaryFolder
 class TrafficRepositoryTest {
     @get:Rule val cacheDir = TemporaryFolder()
 
+    @Test fun captureRecordsDecodeCertificateDiagnostics() = runBlocking {
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport {
+            apiSuccess("""{"running":true,"count":1,"entries":[{"time":"now","method":"TLS","host":"example.test","outbound":"direct","status":0,"duration_ms":1,"tls":"pinned_skipped","passthrough_reason":"client_ca_untrusted","ca_stores":{"user":"present","system":"absent"}}]}""")
+        }))
+        val record = repository.preview().entries.single()
+        assertEquals("client_ca_untrusted", record.passthroughReason)
+        assertEquals("present", record.caStores?.user)
+        assertEquals("absent", record.caStores?.system)
+    }
+
     @Test fun capturedDomainsAndFilteredPagesUseBatchQueriesAndDoNotPolluteCache() = runBlocking {
         val batch = "A".repeat(26)
         val cache = CapturePageCache(cacheDir.root, Json)
@@ -132,6 +142,31 @@ class TrafficRepositoryTest {
         assertTrue(detail.response.body.truncated)
         assertEquals("base64", detail.response.body.format)
         assertEquals("br", detail.response.body.contentEncoding)
+    }
+
+    @Test fun detailDecodesProtocolTrailersAndNestedMessages() = runBlocking {
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("/traffic/detail", request.path)
+            apiSuccess("""
+                {"id":"AAAAAAAAAAAAAAAAAAAAAAAAAA","http":{"url":"https://example.test/example.Echo/Send","url_truncated":false,
+                "request":{"headers":{},"headers_truncated":false,"body":{"data":"","format":"base64","truncated":false}},
+                "response":{"headers":{},"headers_truncated":false,"trailers":{"Grpc-Status":["3"]},
+                "grpc":{"status":"3","message":"sample error","messages":[{"size":4,"fields":[{"number":3,"wire":2,
+                "fields":[{"number":1,"wire":0,"value":"7"}]}]}]},
+                "body":{"data":"","format":"base64","truncated":false}},
+                "websocket":{"frames":[{"direction":"receive","opcode":8,"size":2,"close_code":1000,"truncated":false}],
+                "messages":[{"direction":"receive","opcode":1,"size":8,"text":"example","compressed":true,"truncated":false}],
+                "truncated":false}}}
+            """.trimIndent())
+        }))
+        val detail = requireNotNull(repository.detail("AAAAAAAAAAAAAAAAAAAAAAAAAA").http)
+        assertEquals(listOf("3"), detail.response.trailers["Grpc-Status"])
+        val grpc = requireNotNull(detail.response.grpc)
+        assertEquals("sample error", grpc.message)
+        assertEquals("7", grpc.messages.single().fields.single().fields.single().value)
+        val websocket = requireNotNull(detail.websocket)
+        assertEquals(1000, websocket.frames.single().closeCode)
+        assertTrue(websocket.messages.single().compressed)
     }
 
     @Test fun batchOperationsUseExplicitIDs() = runBlocking {
