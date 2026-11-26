@@ -5,16 +5,86 @@ import com.fanjv.netproxy.core.api.ModuleApiException
 import com.fanjv.netproxy.core.api.ModuleHttpResponse
 import com.fanjv.netproxy.core.api.TestApiTransport
 import com.fanjv.netproxy.core.api.apiSuccess
+import com.fanjv.netproxy.feature.traffic.data.CapturePageCache
 import com.fanjv.netproxy.feature.traffic.data.MitmPolicy
 import com.fanjv.netproxy.feature.traffic.data.RewriteRule
 import com.fanjv.netproxy.feature.traffic.data.TrafficChangedException
 import com.fanjv.netproxy.feature.traffic.data.TrafficRepository
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 
 class TrafficRepositoryTest {
+    @get:Rule val cacheDir = TemporaryFolder()
+
+    @Test fun capturedDomainsAndFilteredPagesUseBatchQueriesAndDoNotPolluteCache() = runBlocking {
+        val batch = "A".repeat(26)
+        val cache = CapturePageCache(cacheDir.root, Json)
+        var pages = 0
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            if (request.path == "/traffic/domains") {
+                assertEquals(mapOf("batch" to batch), request.query)
+                apiSuccess("""[{"host":"example.test","count":2}]""")
+            } else {
+                pages++
+                assertEquals(mapOf("batch" to batch, "before" to "3") +
+                    if (pages == 1) mapOf("host" to "example.test") else emptyMap(), request.query)
+                apiSuccess("""{"entries":[],"batch":"$batch","oldest":"1"}""")
+            }
+        }), cache)
+        assertEquals(2, repository.domains(batch).single().count)
+        repository.page(batch, before = "3", oldest = "1", host = "example.test")
+        repository.page(batch, before = "3", oldest = "1")
+        assertEquals(2, pages)
+    }
+
+    @Test fun rewriteRulesDefaultToEnabledAndPersistExplicitDisable() = runBlocking {
+        val rule = """{"pattern":"/inspect","phase":"request","script":"return {}","domains":["example.test"]}"""
+        var stored = """{"rules":[$rule]}"""
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("/traffic/rules", request.path)
+            if (request.method == "PUT") stored = request.body.toString()
+            apiSuccess(stored)
+        }))
+        val original = repository.rules()
+        assertTrue(original.single().enabled)
+        val disabled = original.map { it.copy(enabled = false) }
+        assertEquals(disabled, repository.saveRules(original, disabled))
+        assertTrue(stored.contains("\"enabled\":false"))
+        assertEquals(original, repository.saveRules(disabled, original))
+    }
+
+    @Test fun rewriteTitlesAreOptionalAndSurviveUpdate() = runBlocking {
+        var stored = """{"rules":[{"pattern":"/get","phase":"request","script":"return {}","domains":["example.test"]}]}"""
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            if (request.method == "PUT") stored = request.body.toString()
+            apiSuccess(stored)
+        }))
+        val original = repository.rules()
+        assertEquals("", original.single().name)
+        val titled = original.map { it.copy(name = "Add test header") }
+        assertEquals(titled, repository.saveRules(original, titled))
+        assertTrue(stored.contains("\"name\":\"Add test header\""))
+        assertEquals(original, repository.saveRules(titled, original))
+        assertTrue(!stored.contains("\"name\""))
+    }
+
+    @Test fun overlayPreviewUsesOneReadAndDecodesSessionTotal() = runBlocking {
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("GET", request.method)
+            assertEquals("/traffic/preview", request.path)
+            apiSuccess("""{"running":true,"count":201,"entries":[{"time":"now","method":"GET","host":"example.test","outbound":"direct","status":200,"duration_ms":1}]}""")
+        }))
+        val preview = repository.preview()
+        assertTrue(preview.running)
+        assertEquals(201, preview.count)
+        assertEquals("example.test", preview.entries.single().host)
+    }
+
     @Test fun captureUsesModulePathsAndDecodesRecordMetadata() = runBlocking {
         val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
             when (request.method to request.path) {
@@ -64,18 +134,66 @@ class TrafficRepositoryTest {
         assertEquals("br", detail.response.body.contentEncoding)
     }
 
+    @Test fun batchOperationsUseExplicitIDs() = runBlocking {
+        val id = "AAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            when (request.method to request.path) {
+                "GET" to "/traffic/batches" -> apiSuccess(
+                    """[{"id":"$id","started_at":"2026-01-01T00:00:00Z","count":2,"running":false}]"""
+                )
+                "GET" to "/traffic/list" -> {
+                    assertEquals(mapOf("batch" to id), request.query)
+                    apiSuccess("[]")
+                }
+                "DELETE" to "/traffic/batches" -> {
+                    assertEquals(mapOf("id" to id), request.query)
+                    assertTrue(request.mutation)
+                    apiSuccess("null")
+                }
+                else -> error("Unexpected request: ${request.method} ${request.path}")
+            }
+        }))
+        assertEquals(id, repository.batches().single().id)
+        assertTrue(repository.records(id).isEmpty())
+        repository.deleteBatch(id)
+    }
+
+    @Test fun capturePagesReuseCacheOnlyForSameRetentionWindowAndInvalidateOnClear() = runBlocking {
+        val id = "AAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val cache = CapturePageCache(cacheDir.root, Json)
+        var reads = 0
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            when (request.method to request.path) {
+                "GET" to "/traffic/page" -> {
+                    assertEquals(mapOf("batch" to id, "before" to "20"), request.query)
+                    reads++
+                    apiSuccess("""{"batch":"$id","entries":[],"before":"10","oldest":"1"}""")
+                }
+                "DELETE" to "/traffic/list" -> apiSuccess("""{"running":false,"count":0}""")
+                else -> error("Unexpected request: ${request.method} ${request.path}")
+            }
+        }), cache)
+        assertEquals("10", repository.page(id, before = "20", oldest = "1").before)
+        assertEquals("10", repository.page(id, before = "20", oldest = "1").before)
+        assertEquals(1, reads)
+        assertEquals("1", repository.page(id, before = "20", oldest = "2").oldest)
+        assertEquals(2, reads)
+        repository.clear()
+        assertEquals(null, cache.read(id, "1", "20"))
+    }
+
     @Test fun replaceRulesDoesNotOverwriteAChangedListAndReportsValidation() = runBlocking {
-        val existing = RewriteRule("example", "request", "return {};")
+        val existing = RewriteRule("example", "request", "return {};", listOf("example.org"))
         val invalid = existing.copy(pattern = "[")
         var writes = 0
         val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
             assertEquals("/traffic/rules", request.path)
             if (request.method == "GET") {
-                apiSuccess("""{"rules":[{"pattern":"example","phase":"request","script":"return {};"}]}""")
+                apiSuccess("""{"rules":[{"pattern":"example","phase":"request","script":"return {};","domains":["example.org"]}]}""")
             } else {
                 assertEquals("PUT", request.method)
                 assertTrue(request.mutation)
-                assertEquals("""{"rules":[{"pattern":"[","phase":"request","script":"return {};"}]}""", request.body.toString())
+                assertEquals("""{"rules":[{"pattern":"[","phase":"request","script":"return {};","domains":["example.org"]}]}""", request.body.toString())
                 writes++
                 ModuleHttpResponse(422, """{"schema":1,"ok":false,"code":"traffic.rules_failed","message":"Invalid URL expression"}""")
             }

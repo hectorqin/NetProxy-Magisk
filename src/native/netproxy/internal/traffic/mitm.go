@@ -25,23 +25,24 @@ const (
 type MITMPolicy struct {
 	Enabled     bool     `json:"enabled"`
 	Hosts       []string `json:"hosts"`
+	BypassHosts []string `json:"bypass_hosts"`
 	SystemTrust bool     `json:"system_trust"`
 }
 
 type mitmState struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	ca     *authority
-	hosts  []string
-	mu     sync.Mutex
-	leaves map[string]tls.Certificate
-	failed map[string]time.Time
+	ctx         context.Context
+	cancel      context.CancelFunc
+	ca          *authority
+	hosts       []string
+	bypassHosts []string
+	mu          sync.Mutex
+	leaves      map[string]tls.Certificate
 }
 
 func loadPolicy(layout paths.Layout) (MITMPolicy, error) {
 	f, err := os.Open(layout.TrafficMITM())
 	if errors.Is(err, os.ErrNotExist) {
-		return MITMPolicy{Hosts: []string{}}, nil
+		return normalizePolicy(MITMPolicy{})
 	}
 	if err != nil {
 		return MITMPolicy{}, errors.New("无法读取 HTTPS 抓包配置")
@@ -56,24 +57,37 @@ func loadPolicy(layout paths.Layout) (MITMPolicy, error) {
 }
 
 func normalizePolicy(policy MITMPolicy) (MITMPolicy, error) {
-	if len(policy.Hosts) > 100 {
-		return MITMPolicy{}, errors.New("最多允许 100 条 HTTPS 抓包主机规则")
+	if len(policy.Hosts) == 0 {
+		policy.Hosts = []string{"*"}
 	}
-	hosts := make([]string, 0, len(policy.Hosts))
-	seen := make(map[string]bool, len(policy.Hosts))
-	for i, pattern := range policy.Hosts {
+	var err error
+	if policy.Hosts, err = normalizeHostPatterns(policy.Hosts); err != nil {
+		return MITMPolicy{}, err
+	}
+	if policy.BypassHosts, err = normalizeHostPatterns(policy.BypassHosts); err != nil {
+		return MITMPolicy{}, err
+	}
+	return policy, nil
+}
+
+func normalizeHostPatterns(patterns []string) ([]string, error) {
+	if len(patterns) > 100 {
+		return nil, errors.New("最多允许 100 条 HTTPS 抓包主机规则")
+	}
+	hosts := make([]string, 0, len(patterns))
+	seen := make(map[string]bool, len(patterns))
+	for i, pattern := range patterns {
 		pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
 		host := strings.TrimPrefix(pattern, "*.")
 		if pattern != "*" && (!validMITMHost(host) || (host != pattern && netipIsIP(host))) {
-			return MITMPolicy{}, fmt.Errorf("第 %d 条 HTTPS 抓包主机规则无效", i+1)
+			return nil, fmt.Errorf("第 %d 条 HTTPS 抓包主机规则无效", i+1)
 		}
 		if !seen[pattern] {
 			seen[pattern] = true
 			hosts = append(hosts, pattern)
 		}
 	}
-	policy.Hosts = hosts
-	return policy, nil
+	return hosts, nil
 }
 
 func netipIsIP(host string) bool {
@@ -106,42 +120,22 @@ func newMITM(policy MITMPolicy, ca *authority) *mitmState {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &mitmState{ctx: ctx, cancel: cancel, ca: ca, hosts: policy.Hosts,
-		leaves: make(map[string]tls.Certificate), failed: make(map[string]time.Time)}
+	return &mitmState{ctx: ctx, cancel: cancel, ca: ca, hosts: policy.Hosts, bypassHosts: policy.BypassHosts,
+		leaves: make(map[string]tls.Certificate)}
 }
 
 func (s *mitmState) matches(host string) bool {
-	if s == nil || !validMITMHost(host) {
-		return false
-	}
-	for _, pattern := range s.hosts {
+	return s != nil && validMITMHost(host) &&
+		matchesHostPatterns(s.hosts, host) && !matchesHostPatterns(s.bypassHosts, host)
+}
+
+func matchesHostPatterns(patterns []string, host string) bool {
+	for _, pattern := range patterns {
 		if pattern == "*" || pattern == host || (strings.HasPrefix(pattern, "*.") && strings.HasSuffix(host, pattern[1:])) {
 			return true
 		}
 	}
 	return false
-}
-
-func (s *mitmState) bypass(host string, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return now.Before(s.failed[host])
-}
-
-func (s *mitmState) rememberFailure(host string, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.failed) >= maxCachedHosts {
-		var oldest time.Time
-		var oldestHost string
-		for name, until := range s.failed {
-			if oldestHost == "" || until.Before(oldest) {
-				oldestHost, oldest = name, until
-			}
-		}
-		delete(s.failed, oldestHost)
-	}
-	s.failed[host] = now.Add(10 * time.Minute)
 }
 
 func (s *mitmState) certificate(host string, now time.Time) (tls.Certificate, error) {

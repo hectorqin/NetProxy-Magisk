@@ -5,7 +5,11 @@ interface CaptureBody {
   captured_size?: number
   content_type?: string
   content_encoding?: string
+  decoded?: boolean
   truncated: boolean
+  blob?: boolean
+  filename?: string
+  content_range?: string
 }
 
 interface CaptureMessage {
@@ -34,9 +38,13 @@ export interface CaptureDetail {
   status: number
   outbound: string
   duration_ms: number
+  passthrough_reason?: string
   source_app?: { uid: number, user_id: number, package?: string }
   exit?: { inbound?: string, chain?: { tag: string, type: string }[], remote?: string, package?: string, uid?: number, process?: string }
-  http?: { url: string, url_truncated: boolean, request: CaptureMessage, response: CaptureMessage, rewrites?: RewriteMatch[] }
+  http?: {
+    url: string, url_truncated: boolean, request: CaptureMessage, response: CaptureMessage, rewrites?: RewriteMatch[]
+    websocket?: { frames: { direction: string, opcode: number, size: number, text?: string, truncated: boolean }[], truncated: boolean }
+  }
 }
 
 const states: Record<string, string> = {
@@ -45,6 +53,14 @@ const states: Record<string, string> = {
 const errors: Record<string, string> = {
   busy: '脚本执行器繁忙', deadline: '脚本超时', body_unavailable: '正文无法重写',
   invalid_result: '脚本结果无效', script_error: '脚本执行失败',
+}
+const passthroughReasons: Record<string, string> = {
+  certificate_rejected: '证书固定或不信任 · 已跳过', excluded_host: '主机在排除名单中',
+  host_not_selected: '主机未选中解密', decryption_disabled: 'HTTPS 解密已关闭',
+  decryption_unavailable: 'HTTPS 解密不可用', non_tls: '非 TLS 流量',
+  sniff_timeout: '协议识别超时', unsupported_alpn: '不支持的 TLS 应用协议',
+  protocol_unidentified: '协议无法识别', tls_hello_unavailable: '无法识别 TLS ClientHello',
+  tls_host_unavailable: '无法识别 TLS 主机',
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] {
@@ -84,9 +100,24 @@ function copy(label: string, value: string) {
 
 export function formatCaptureBody(data: string, type?: string): string {
   const mime = type?.split(';', 1)[0].trim().toLowerCase()
-  if (mime !== 'application/json' && !mime?.endsWith('+json')) return data
   try {
-    return JSON.stringify(JSON.parse(data), null, 2)
+    if (mime === 'application/json' || mime?.endsWith('+json')) return JSON.stringify(JSON.parse(data), null, 2)
+    if (mime === 'application/x-www-form-urlencoded') {
+      return Array.from(new URLSearchParams(data), ([key, value]) => `${key} = ${value}`).join('\n')
+    }
+    if (mime && (['text/html', 'text/xml', 'application/xml', 'image/svg+xml'].includes(mime) || mime.endsWith('+xml'))) {
+      return data.replace(/>\s*(?=<)/g, '>\n')
+    }
+    return data
+  } catch {
+    return data
+  }
+}
+
+export function captureHex(data: string): string {
+  try {
+    return Array.from(atob(data), (value, index) =>
+      `${index ? index % 16 === 0 ? '\n' : ' ' : ''}${value.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')
   } catch {
     return data
   }
@@ -112,21 +143,24 @@ function message(title: string, data: CaptureMessage) {
 
   const body = data.body
   const payload = section(['正文', body.content_type, body.size === undefined ? '' : `${body.size} 字节`,
-    body.content_encoding, body.format === 'base64' ? 'Base64' : '', body.truncated ? '已截断' : ''].filter(Boolean).join(' · '))
-  if (body.truncated) line(payload, '已捕获大小', body.captured_size)
-  if (!body.data) payload.append(element('p', '没有正文'))
+    body.content_encoding, body.decoded ? '已解压' : '', body.format === 'base64' ? 'Base64' : '', body.truncated ? '已截断' : ''].filter(Boolean).join(' · '))
+  if (body.truncated || body.blob) line(payload, '已捕获大小', body.captured_size)
+  line(payload, '文件名', body.filename)
+  line(payload, '响应分段', body.content_range)
+  if (body.blob) payload.append(element('p', '二进制正文已保存在本地；可在 Android 管理器中预览或导出已保留的字节。'))
+  else if (!body.data) payload.append(element('p', body.format === 'binary' ? '未保留二进制正文' : '没有正文'))
   else {
     payload.addEventListener('toggle', () => {
       if (!payload.open || payload.querySelector('pre')) return
-      const pretty = body.format === 'text' ? formatCaptureBody(body.data, body.content_type) : body.data
+      const pretty = body.format === 'text' ? formatCaptureBody(body.data, body.content_type) : captureHex(body.data)
       const code = element('pre', pretty)
       if (pretty !== body.data) {
-        const toggle = element('button', '显示原始 JSON')
+        const toggle = element('button', '显示原始正文')
         toggle.type = 'button'
         toggle.addEventListener('click', () => {
           const raw = code.textContent === pretty
           code.textContent = raw ? body.data : pretty
-          toggle.textContent = raw ? '格式化 JSON' : '显示原始 JSON'
+          toggle.textContent = raw ? '格式化正文' : '显示原始正文'
         })
         payload.append(toggle)
       }
@@ -147,6 +181,7 @@ export function renderCaptureDetail(data: CaptureDetail): HTMLElement {
   if (data.http?.url_truncated) overview.append(element('p', 'URL 已截断'))
   line(overview, '入站', data.exit?.inbound)
   line(overview, '匹配的出站', data.outbound)
+  if (data.passthrough_reason) line(overview, '透传原因', passthroughReasons[data.passthrough_reason] ?? data.passthrough_reason)
   line(overview, '代理出口链', data.exit?.chain?.map(hop => `${hop.tag} (${hop.type})`).join(' → '))
   line(overview, '传输对端', data.exit?.remote)
   line(overview, '来源应用', data.source_app?.package ?? data.exit?.package)
@@ -178,5 +213,15 @@ export function renderCaptureDetail(data: CaptureDetail): HTMLElement {
     rewrites.append(row)
   }
   article.append(rewrites, message('请求', data.http.request), message('响应', data.http.response))
+  if (data.http.websocket) {
+    const socket = section('WebSocket 帧', true)
+    for (const frame of data.http.websocket.frames) {
+      line(socket, frame.direction === 'send' ? '发送' : '接收', `0x${frame.opcode.toString(16)} · ${frame.size} 字节`)
+      if (frame.text) socket.append(element('pre', frame.text))
+      if (frame.truncated) socket.append(element('p', '文本预览已截断。'))
+    }
+    if (data.http.websocket.truncated) socket.append(element('p', '仅显示前 64 帧。'))
+    article.append(socket)
+  }
   return article
 }

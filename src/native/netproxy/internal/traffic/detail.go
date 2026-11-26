@@ -1,6 +1,10 @@
 package traffic
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/base64"
 	"io"
 	"mime"
@@ -10,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
+
+	"github.com/andybalholm/brotli"
 )
 
 const (
@@ -21,15 +27,17 @@ const (
 
 type Record struct {
 	Entry
-	HTTP *HTTPDetail `json:"http,omitempty"`
+	HTTP     *HTTPDetail `json:"http,omitempty"`
+	hasMedia bool
 }
 
 type HTTPDetail struct {
-	URL          string          `json:"url"`
-	URLTruncated bool            `json:"url_truncated"`
-	Request      CapturedMessage `json:"request"`
-	Response     CapturedMessage `json:"response"`
-	Rewrites     []RewriteMatch  `json:"rewrites,omitempty"`
+	URL          string           `json:"url"`
+	URLTruncated bool             `json:"url_truncated"`
+	Request      CapturedMessage  `json:"request"`
+	Response     CapturedMessage  `json:"response"`
+	Rewrites     []RewriteMatch   `json:"rewrites,omitempty"`
+	WebSocket    *WebSocketDetail `json:"websocket,omitempty"`
 }
 
 type CapturedMessage struct {
@@ -47,6 +55,12 @@ type CapturedBody struct {
 	Truncated       bool   `json:"truncated"`
 	Size            int64  `json:"size"`
 	CapturedSize    int    `json:"captured_size"`
+	Decoded         bool   `json:"decoded,omitempty"`
+	Blob            bool   `json:"blob,omitempty"`
+	ContentRange    string `json:"content_range,omitempty"`
+	Disposition     string `json:"content_disposition,omitempty"`
+	Filename        string `json:"filename,omitempty"`
+	incomplete      bool
 }
 
 func (d *HTTPDetail) size() int {
@@ -57,6 +71,11 @@ func (d *HTTPDetail) size() int {
 	for _, m := range d.Rewrites {
 		size += m.size()
 	}
+	if d.WebSocket != nil {
+		for _, frame := range d.WebSocket.Frames {
+			size += 128 + len(frame.Text)
+		}
+	}
 	return size
 }
 
@@ -65,11 +84,20 @@ type bodyCapture struct {
 	data      []byte
 	truncated bool
 	total     int64
+	binary    bool
+	spool     *mediaSpool
 }
 
 func (c *bodyCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.binary {
+		if c.spool != nil {
+			c.spool.offer(p)
+		}
+		c.total += int64(len(p))
+		return len(p), nil
+	}
 	n := min(captureBodyLimit-len(c.data), len(p))
 	if n > 0 {
 		c.data = append(c.data, p[:n]...)
@@ -86,16 +114,27 @@ func (c *bodyCapture) body(headers http.Header, length int64, incomplete bool) C
 	encoding := strings.Clone(validPrefix(strings.Join(headers.Values("Content-Encoding"), ", "), 256))
 	b := CapturedBody{Format: "text", ContentType: kind, ContentEncoding: encoding,
 		Truncated: c.truncated || incomplete || length > int64(len(c.data)),
-		Size:      max(length, c.total), CapturedSize: len(c.data)}
+		Size:      max(length, c.total), CapturedSize: len(c.data),
+		ContentRange: strings.Clone(validPrefix(headers.Get("Content-Range"), 256)),
+		Disposition:  strings.Clone(validPrefix(headers.Get("Content-Disposition"), 512))}
+	if c.binary {
+		_, params, _ := mime.ParseMediaType(b.Disposition)
+		b.Filename = strings.Clone(validPrefix(params["filename"], 256))
+		b.Format, b.Truncated, b.incomplete = "binary", b.Size != 0 || incomplete, incomplete
+		return b
+	}
 	if len(c.data) == 0 {
 		return b
 	}
 	mediaType, _, _ := mime.ParseMediaType(kind)
-	textual := mediaType == "" || strings.HasPrefix(mediaType, "text/") ||
-		strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml") ||
-		mediaType == "application/json" || mediaType == "application/xml" ||
-		mediaType == "application/x-www-form-urlencoded" || mediaType == "application/javascript"
+	textual := textBody(mediaType)
 	data := c.data
+	if preview, ok := decodedBody(data, encoding, b.Truncated); ok {
+		data = preview[:min(len(preview), captureBodyLimit)]
+		b.Decoded = true
+		b.Truncated = b.Truncated || len(preview) > captureBodyLimit
+		b.CapturedSize = len(data)
+	}
 	if b.Truncated {
 		for i := len(data) - 1; i >= max(0, len(data)-utf8.UTFMax); i-- {
 			if utf8.RuneStart(data[i]) {
@@ -106,12 +145,42 @@ func (c *bodyCapture) body(headers http.Header, length int64, incomplete bool) C
 			}
 		}
 	}
-	if textual && (encoding == "" || strings.EqualFold(encoding, "identity")) && utf8.Valid(data) {
+	if textual && (b.Decoded || encoding == "" || strings.EqualFold(encoding, "identity")) && utf8.Valid(data) {
 		b.Data = string(data)
+		if b.Decoded {
+			b.CapturedSize = len(data)
+		}
 	} else {
-		b.Format, b.Data = "base64", base64.StdEncoding.EncodeToString(c.data)
+		if !b.Decoded {
+			data = c.data
+		}
+		b.Format, b.Data = "base64", base64.StdEncoding.EncodeToString(data)
 	}
 	return b
+}
+
+func decodedBody(raw []byte, encoding string, truncated bool) ([]byte, bool) {
+	var reader io.ReadCloser
+	var err error
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip", "x-gzip":
+		reader, err = gzip.NewReader(bytes.NewReader(raw))
+	case "deflate":
+		reader, err = zlib.NewReader(bytes.NewReader(raw))
+		if err == zlib.ErrHeader {
+			reader, err = flate.NewReader(bytes.NewReader(raw)), nil
+		}
+	case "br":
+		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(raw)))
+	default:
+		return nil, false
+	}
+	if err != nil {
+		return nil, false
+	}
+	defer reader.Close()
+	preview, err := io.ReadAll(io.LimitReader(reader, captureBodyLimit+1))
+	return preview, err == nil || truncated && err == io.ErrUnexpectedEOF && len(preview) > 0
 }
 
 func validPrefix(value string, limit int) string {
@@ -146,7 +215,26 @@ func captureMessage(source http.Header) CapturedMessage {
 
 func (m *CapturedMessage) setBody(body CapturedBody) {
 	m.Body = body
-	m.size += len(body.Data) + len(body.ContentEncoding) + len(body.ContentType)
+	m.size += len(body.Data) + len(body.ContentEncoding) + len(body.ContentType) +
+		len(body.ContentRange) + len(body.Disposition) + len(body.Filename)
+}
+
+func (c *bodyCapture) initMedia(headers http.Header, factory func() *mediaSpool) {
+	c.binary = mediaBody(headers)
+	if c.binary && factory != nil {
+		c.spool = factory()
+	}
+}
+
+func (c *bodyCapture) finishMedia() *mediaSpool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	spool := c.spool
+	c.spool = nil
+	if spool != nil {
+		close(spool.chunks)
+	}
+	return spool
 }
 
 type captureWriter struct {
@@ -155,10 +243,14 @@ type captureWriter struct {
 	body    bodyCapture
 	failed  bool
 	head    bool
+	factory func() *mediaSpool
 }
 
 func (w *captureWriter) WriteHeader(status int) {
 	*w.message = captureMessage(w.Header())
+	if !w.head && w.body.spool == nil && status >= 200 && status != http.StatusNoContent && status != http.StatusNotModified {
+		w.body.initMedia(w.Header(), w.factory)
+	}
 	w.ResponseWriter.WriteHeader(status)
 }
 

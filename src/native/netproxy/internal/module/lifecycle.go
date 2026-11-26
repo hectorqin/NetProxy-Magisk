@@ -419,9 +419,7 @@ func Boot(ctx context.Context, options Options) error {
 	var compatibility sync.WaitGroup
 	compatibility.Go(func() { RepairGoogleConnectivity(ctx, options, time.Minute) })
 	defer compatibility.Wait()
-	if err := traffic.RestoreSystemTrust(ctx, paths.New(options.ModuleDir)); err != nil {
-		logService(options, "WARN", "traffic.trust", "failed", "抓包 CA 未完成系统挂载: %v", err)
-	}
+	traffic.RestoreSystemTrust(ctx, paths.New(options.ModuleDir), "boot")
 	if err := EnsureWorker(ctx, options); err != nil {
 		logService(options, "WARN", "worker.start", "failed", "后台 Worker 启动失败，可稍后手动重试: %v", err)
 	}

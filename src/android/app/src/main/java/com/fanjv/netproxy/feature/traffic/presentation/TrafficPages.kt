@@ -1,5 +1,8 @@
 package com.fanjv.netproxy.feature.traffic.presentation
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -16,26 +19,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.List
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -45,27 +55,38 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fanjv.netproxy.R
+import com.fanjv.netproxy.NetProxyApplication
 import com.fanjv.netproxy.core.api.ModuleApiException
 import com.fanjv.netproxy.core.ui.component.AdaptiveTopAppBar
 import com.fanjv.netproxy.core.ui.component.AppBarButton
+import com.fanjv.netproxy.core.ui.component.AppDialog
+import com.fanjv.netproxy.core.ui.component.AppDialogButton
+import com.fanjv.netproxy.core.ui.component.DialogActionRole
 import com.fanjv.netproxy.core.ui.component.BackIconButton
+import com.fanjv.netproxy.core.ui.component.BlurredBar
 import com.fanjv.netproxy.core.ui.component.CardItem
 import com.fanjv.netproxy.core.ui.component.ContentStatus
 import com.fanjv.netproxy.core.ui.component.TopBarMenuAction
 import com.fanjv.netproxy.core.ui.component.TopBarMoreMenu
 import com.fanjv.netproxy.core.ui.component.groupedCardSection
+import com.fanjv.netproxy.core.ui.component.rememberBlurBackdrop
 import com.fanjv.netproxy.feature.apps.presentation.AppInfoModel
 import com.fanjv.netproxy.feature.apps.presentation.AppIcon
 import com.fanjv.netproxy.feature.traffic.data.CaptureRecord
 import com.fanjv.netproxy.feature.traffic.data.TrafficChangedException
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.DropdownDefaults
 import top.yukonga.miuix.kmp.basic.DropdownEntry
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.glass.GlassTextField
 import top.yukonga.miuix.kmp.popup.WindowDropdownPopup
 import top.yukonga.miuix.kmp.preference.ArrowPreference
@@ -81,13 +102,31 @@ internal fun TrafficFrame(
     subtitle: String = "",
     actions: @Composable RowScope.() -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
+    onBack: (() -> Unit)? = null,
+    topBarModifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val navigator = LocalNavigator.current
+    val scrollBehavior = MiuixScrollBehavior()
+    val backdrop = rememberBlurBackdrop()
     Scaffold(topBar = {
-        AdaptiveTopAppBar(title = stringResource(title), subtitle = subtitle,
-            navigationIcon = { BackIconButton(onClick = navigator::pop) }, actions = actions)
-    }, floatingActionButton = floatingActionButton, content = content)
+        BlurredBar(backdrop) {
+            AdaptiveTopAppBar(
+                title = stringResource(title),
+                modifier = topBarModifier,
+                subtitle = subtitle,
+                color = if (backdrop != null) Color.Transparent else MiuixTheme.colorScheme.surface,
+                scrollBehavior = scrollBehavior,
+                navigationIcon = { BackIconButton(onClick = onBack ?: navigator::pop) },
+                actions = actions,
+            )
+        }
+    }, floatingActionButton = floatingActionButton) { padding ->
+        Box(Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection)
+            .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)) {
+            content(padding)
+        }
+    }
 }
 
 @Composable
@@ -113,6 +152,14 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                         checked = status?.running == true, enabled = status != null && !state.busy,
                         onCheckedChange = viewModel::setCapture, insideMargin = TrafficRowInsets,
                     )
+                    SwitchPreference(
+                        title = stringResource(R.string.traffic_disable_quic),
+                        summary = stringResource(R.string.traffic_disable_quic_summary),
+                        checked = state.captureAppPolicy?.disableQuic == true,
+                        enabled = state.captureAppPolicy?.disableQuic != null && !state.busy,
+                        onCheckedChange = viewModel::setCaptureDisableQuic, insideMargin = TrafficRowInsets,
+                    )
+                    CaptureOverlayPreference(status?.running == true)
                     Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween) {
                         StatusBadge(status?.count?.let { stringResource(R.string.traffic_record_count, it) } ?: "—")
@@ -134,7 +181,7 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                 CardItem("apps") {
                     ArrowPreference(title = stringResource(R.string.traffic_capture_apps),
                         summary = stringResource(R.string.traffic_capture_apps_summary),
-                        onClick = { viewModel.openAppPicker() }, enabled = !state.busy,
+                        onClick = { navigator.push(Route.TrafficApps) }, enabled = !state.busy,
                         insideMargin = TrafficRowInsets,
                         startAction = {
                             Icon(Icons.Rounded.Android, null, Modifier.padding(end = 12.dp),
@@ -154,8 +201,51 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
             ))
         }
     }
-    state.appDraft?.let { TrafficAppPicker(it, state.appCatalog, state.saving, state.failure,
-        viewModel::loadAppIcon, viewModel::editCaptureApps, viewModel::saveCaptureApps) }
+}
+
+@Composable
+private fun CaptureOverlayPreference(capturing: Boolean) {
+    val context = LocalContext.current
+    val overlay = (context.applicationContext as NetProxyApplication).container.captureOverlay
+    var enabled by remember { mutableStateOf(overlay.enabled) }
+    var granted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var explain by rememberSaveable { mutableStateOf(false) }
+    LifecycleResumeEffect(Unit) {
+        granted = Settings.canDrawOverlays(context)
+        onPauseOrDispose { }
+    }
+    LaunchedEffect(capturing, enabled, granted) {
+        if (capturing && enabled && !granted && overlay.claimPermissionHint()) explain = true
+    }
+    SwitchPreference(
+        title = stringResource(R.string.traffic_overlay),
+        summary = stringResource(R.string.traffic_overlay_summary),
+        checked = enabled,
+        onCheckedChange = {
+            overlay.enabled = it
+            enabled = it
+        },
+        insideMargin = TrafficRowInsets,
+    )
+    if (enabled && !granted) {
+        ArrowPreference(title = stringResource(R.string.traffic_overlay_permission),
+            onClick = { explain = true }, insideMargin = TrafficRowInsets)
+    }
+    AppDialog(
+        show = explain && enabled && !granted,
+        title = stringResource(R.string.traffic_overlay_permission),
+        summary = stringResource(R.string.traffic_overlay_explain),
+        onDismissRequest = { explain = false },
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppDialogButton(stringResource(R.string.common_cancel), { explain = false }, Modifier.weight(1f))
+            AppDialogButton(stringResource(R.string.traffic_overlay_open_settings), {
+                explain = false
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.fromParts("package", context.packageName, null))
+                runCatching { context.startActivity(intent) }
+            }, Modifier.weight(1f), role = DialogActionRole.Primary)
+        }
+    }
 }
 
 @Composable
@@ -179,7 +269,16 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
     var app by rememberSaveable { mutableStateOf<String?>(null) }
     var outbound by rememberSaveable { mutableStateOf<String?>(null) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
+    var deleteBatch by rememberSaveable { mutableStateOf<String?>(null) }
+    var showDomains by rememberSaveable { mutableStateOf(false) }
+    var grouping by rememberSaveable { mutableStateOf(SessionGrouping.None) }
+    var collapsed by remember(grouping) { mutableStateOf(emptySet<String>()) }
     val records = state.records.value.orEmpty()
+    val historical = state.batches.value.orEmpty().filterNot { it.running }
+    val batchLabels = historical.map {
+        "${it.id.take(6)} · ${it.startedAt.substringBefore('.').substringBefore('Z').replace('T', ' ')} UTC · " +
+            stringResource(R.string.traffic_record_count, it.count)
+    }
     LaunchedEffect(viewModel) { viewModel.loadAppCatalog() }
     val methods = remember(records) {
         (listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD") + records.map { it.method }).distinct()
@@ -193,20 +292,63 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
     val visible = remember(records, query, method, statusClass, tls, rewrittenOnly, app, outbound) {
         records.filter { it.matchesSession(query, method, statusClass, tls, rewrittenOnly, app, outbound) }
     }
+    val groups = remember(visible, grouping) { visible.groupSessions(grouping) }
+    val listState = key(state.selectedBatch, state.selectedDomain) { rememberLazyListState() }
+    val before = state.page?.before
+    val running = state.status.value?.running == true
+    LaunchedEffect(listState, before, visible.isNotEmpty(), state.busy, state.loadingOlder, state.olderError) {
+        if (before != null && visible.isNotEmpty() && !state.busy && !state.loadingOlder && state.olderError == null) {
+            snapshotFlow {
+                val layout = listState.layoutInfo
+                val last = layout.visibleItemsInfo.lastOrNull()?.index ?: return@snapshotFlow false
+                last >= layout.totalItemsCount - 5
+            }.first { it }
+            viewModel.loadOlder()
+        }
+    }
+    LaunchedEffect(running, state.selectedBatch) {
+        if (running && state.selectedBatch == null) while (true) {
+            delay(2000)
+            viewModel.pollRecords()
+        }
+    }
     RefreshOnResume(viewModel)
-    TopBarMoreMenu(listOf(TopBarMenuAction(stringResource(R.string.traffic_clear), records.isNotEmpty() && !state.busy) {
-        confirmClear = true
-    }), stringResource(R.string.more_options)) { menu ->
+    val groupingActions = SessionGrouping.entries.map { option ->
+        val label = stringResource(when (option) {
+            SessionGrouping.None -> R.string.traffic_group_none
+            SessionGrouping.App -> R.string.traffic_group_app
+            SessionGrouping.Domain -> R.string.traffic_group_domain
+            SessionGrouping.Outbound -> R.string.traffic_group_outbound
+        })
+        TopBarMenuAction(label, grouping != option) { grouping = option }
+    }
+    val batchActions = listOf(
+        TopBarMenuAction(stringResource(R.string.traffic_delete_batch), state.selectedBatch != null && !state.busy) {
+            deleteBatch = state.selectedBatch
+        },
+        TopBarMenuAction(stringResource(R.string.traffic_clear),
+            (records.isNotEmpty() || state.batches.value.orEmpty().any { it.count > 0 } ||
+                (state.status.value?.count ?: 0) > 0 || historical.isNotEmpty()) && !state.busy) { confirmClear = true },
+    )
+    TopBarMoreMenu(groupingActions + batchActions, stringResource(R.string.more_options)) { menu ->
         TrafficFrame(R.string.traffic_records, stringResource(R.string.traffic_record_count, records.size),
             actions = {
                 AppBarButton(viewModel::refresh, !state.busy) { Icon(Icons.Rounded.Refresh, stringResource(R.string.traffic_refresh)) }
                 menu()
             }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
+                if (historical.isNotEmpty()) Row(Modifier.padding(horizontal = 16.dp)) {
+                    FilterDropdown(R.string.traffic_default_batch, historical.map { it.id }, state.selectedBatch, batchLabels,
+                        defaultLabel = R.string.traffic_default_batch) { viewModel.selectBatch(it) }
+                }
                 GlassTextField(value = query, onValueChange = { query = it }, label = stringResource(R.string.traffic_search),
                     useLabelAsPlaceholder = true, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 3.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val domainLabel = state.selectedDomain ?: stringResource(R.string.traffic_domain_filter)
+                    FilterChip("$domainLabel ▾", state.selectedDomain != null, Modifier.clickable(enabled = !state.busy) {
+                        showDomains = true
+                    })
                     FilterDropdown(R.string.traffic_method, methods, method) { method = it }
                     FilterDropdown(R.string.traffic_http_status, (1..5).map { "${it}xx" }, statusClass?.let { "${it}xx" }) {
                         statusClass = it?.firstOrNull()?.digitToInt()
@@ -220,28 +362,66 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
                     FilterDropdown(R.string.traffic_outbound, outbounds, outbound) { outbound = it }
                 }
                 val issue = state.records.error ?: state.failure
-                if (visible.isEmpty()) ContentStatus(PaddingValues(0.dp), when {
+                if (visible.isEmpty() && before == null) ContentStatus(PaddingValues(0.dp), when {
                     issue != null -> trafficError(issue, R.string.traffic_read_failed)
-                    records.isNotEmpty() -> stringResource(R.string.traffic_no_matches)
+                    records.isNotEmpty() || state.selectedDomain != null -> stringResource(R.string.traffic_no_matches)
                     else -> stringResource(R.string.traffic_empty)
                 }, loading = state.loading)
-                else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                else LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     issue?.let { item { TrafficErrorText(it) } }
-                    itemsIndexed(visible, key = { index, record -> record.id ?: "$index:${record.time}" }) { _, record ->
-                        val sourceApp = state.appCatalog[record.appRef]
-                        if (sourceApp != null) LaunchedEffect(sourceApp.iconKey) { viewModel.loadAppIcon(sourceApp.iconKey) }
-                        SessionRow(record, sourceApp) {
-                            viewModel.openRecord(record)
-                            navigator.push(Route.TrafficInspector(record.id ?: ""))
+                    if (visible.isEmpty()) item {
+                        Text(stringResource(R.string.traffic_no_matches), Modifier.padding(vertical = 10.dp))
+                    }
+                    for ((key, rows) in groups) {
+                        val groupKey = "group:${grouping.name}:${key.orEmpty()}"
+                        val expanded = groupKey !in collapsed
+                        if (grouping != SessionGrouping.None) item(key = groupKey) {
+                            val groupApp = if (grouping == SessionGrouping.App) state.appCatalog[key] else null
+                            if (groupApp != null) LaunchedEffect(groupApp.iconKey) { viewModel.loadAppIcon(groupApp.iconKey) }
+                            val title = groupApp?.let { "${it.label} · $key" } ?: key
+                                ?: stringResource(R.string.traffic_group_unknown)
+                            SessionGroupHeader(title, rows.size, groupApp, expanded) {
+                                collapsed = if (expanded) collapsed + groupKey else collapsed - groupKey
+                            }
                         }
+                        if (expanded) itemsIndexed(rows, key = { index, record -> record.id ?: "$groupKey:$index:${record.time}" }) { _, record ->
+                            val sourceApp = state.appCatalog[record.appRef]
+                            if (sourceApp != null) LaunchedEffect(sourceApp.iconKey) { viewModel.loadAppIcon(sourceApp.iconKey) }
+                            SessionRow(record, sourceApp) {
+                                viewModel.openRecord(record)
+                                navigator.push(Route.TrafficInspector(record.id ?: ""))
+                            }
+                        }
+                    }
+                    if (before != null) item(key = "load-older") {
+                        state.olderError?.let { TrafficErrorText(it) }
+                        ArrowPreference(title = stringResource(R.string.traffic_load_older),
+                            enabled = !state.busy && !state.loadingOlder, onClick = viewModel::loadOlder)
                     }
                 }
             }
         }
     }
+    if (showDomains) CaptureDomainPicker(viewModel, state.page?.batch ?: state.selectedBatch, state.selectedDomain,
+        allowAll = true, onDismiss = { showDomains = false }, choose = viewModel::selectDomain)
     TrafficConfirmation(confirmClear, R.string.traffic_clear, R.string.traffic_clear_prompt,
         { confirmClear = false }, { confirmClear = false; viewModel.clear() })
+    TrafficConfirmation(deleteBatch != null, R.string.traffic_delete_batch, R.string.traffic_delete_batch_prompt,
+        { deleteBatch = null }, { deleteBatch?.let(viewModel::deleteBatch); deleteBatch = null })
+}
+
+@Composable
+private fun SessionGroupHeader(title: String, count: Int, app: AppInfoModel?, expanded: Boolean, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().background(MiuixTheme.colorScheme.surfaceContainer, RoundedCornerShape(14.dp))
+        .clickable(role = Role.Button, onClick = onClick).heightIn(min = 44.dp).padding(horizontal = 10.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (app != null) AppIcon(app, size = 20.dp)
+        SmallTitle(title, Modifier.weight(1f), insideMargin = PaddingValues(0.dp))
+        StatusBadge(stringResource(R.string.traffic_record_count, count))
+        Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+            stringResource(if (expanded) R.string.traffic_group_collapse else R.string.traffic_group_expand))
+    }
 }
 
 @Composable
@@ -262,6 +442,10 @@ private fun SessionRow(record: CaptureRecord, app: AppInfoModel?, onClick: () ->
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (record.rewritten) Text(stringResource(R.string.traffic_rewritten), color = primary,
                     style = MiuixTheme.textStyles.footnote2, maxLines = 1)
+            }
+            record.passthroughReason?.let {
+                Text(passthroughLabel(it), style = MiuixTheme.textStyles.footnote2, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 val source = app?.label ?: record.sourceApp?.packageName ?: record.appKey
@@ -297,10 +481,11 @@ internal fun StatusBadge(text: String, color: Color = MiuixTheme.colorScheme.pri
 }
 
 @Composable
-private fun FilterDropdown(title: Int, values: List<String>, selected: String?, labels: List<String> = values, choose: (String?) -> Unit) {
+private fun FilterDropdown(title: Int, values: List<String>, selected: String?, labels: List<String> = values,
+    defaultLabel: Int = R.string.traffic_filter_all, choose: (String?) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val label = labels.getOrNull(values.indexOf(selected)) ?: selected ?: stringResource(title)
-    val all = stringResource(R.string.traffic_filter_all)
+    val all = stringResource(defaultLabel)
     Box {
         FilterChip("$label ▾", selected != null, Modifier.clickable { open = true })
         WindowDropdownPopup(
@@ -338,7 +523,22 @@ internal fun tlsLabel(tls: String?): String = when (tls) {
     "decrypted" -> stringResource(R.string.traffic_tls_decrypted)
     "bypass" -> stringResource(R.string.traffic_tls_bypass)
     "handshake_failed" -> stringResource(R.string.traffic_tls_failed)
+    "pinned_skipped" -> stringResource(R.string.traffic_skip_certificate)
     else -> tls ?: "—"
+}
+
+@Composable
+internal fun passthroughLabel(reason: String): String = when (reason) {
+    "certificate_rejected" -> stringResource(R.string.traffic_skip_certificate)
+    "excluded_host" -> stringResource(R.string.traffic_skip_excluded)
+    "host_not_selected" -> stringResource(R.string.traffic_skip_unselected)
+    "decryption_disabled" -> stringResource(R.string.traffic_skip_disabled)
+    "decryption_unavailable" -> stringResource(R.string.traffic_skip_unavailable)
+    "non_tls" -> stringResource(R.string.traffic_skip_non_tls)
+    "sniff_timeout" -> stringResource(R.string.traffic_skip_timeout)
+    "unsupported_alpn" -> stringResource(R.string.traffic_skip_alpn)
+    "tls_hello_unavailable", "tls_host_unavailable", "protocol_unidentified" -> stringResource(R.string.traffic_skip_unidentified)
+    else -> reason
 }
 
 @Composable

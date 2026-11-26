@@ -60,7 +60,7 @@ const MODULE_DOCUMENTS = [
 
 const CONFIG_DOCUMENTS = [
   { id: 'inbound', filename: 'inbound.json', category: 'inbound', editable: true },
-  ...['backend', 'root_policy', 'ipv6', 'app', 'ebpf', 'tun'].map(section => ({
+  ...['backend', 'root_policy', 'ipv6', 'sniff_destination', 'app', 'ebpf', 'tun'].map(section => ({
     id: `inbound/${section}`, filename: section, category: 'inbound', editable: true, section,
   })),
   { id: 'singbox/config.json', filename: 'config.json', category: 'config', editable: true },
@@ -164,7 +164,9 @@ function execute(args: string[]): CtlResult<unknown> {
     if (action === 'traffic') {
       if (clean[2] === 'status') return response('traffic.status', '抓包状态', { running: false, count: 0 })
       if (clean[2] === 'list') return response('traffic.list', '抓包记录', [])
-      if (clean[2] === 'apps') return response('traffic.apps', '抓包应用配置', { apps: [] })
+      if (clean[2] === 'batches') return response('traffic.batches', '抓包批次', [])
+      if (clean[2] === 'page') return response('traffic.page', '抓包记录分页', { entries: [] })
+      if (clean[2] === 'apps') return response('traffic.apps', '抓包应用配置', { apps: [], disable_quic: true })
       if (clean[2] === 'detail' && clean[3] === capturePreviewId) {
         return response('traffic.detail', '抓包详情', { ...capturePreview, http: {
           url: 'https://example.test/orders?preview=true', url_truncated: false,
@@ -175,7 +177,8 @@ function execute(args: string[]): CtlResult<unknown> {
       }
       if (clean[2] === 'detail') return failure('traffic.record_not_found', '抓包记录已清除或过期')
       if (clean[2] === 'rules') return response('traffic.rules', '重写规则', { rules: [] })
-      if (clean[2] === 'mitm') return response('traffic.mitm', 'HTTPS 解密配置', { enabled: false, hosts: [], system_trust: false })
+      if (clean[2] === 'mitm') return response('traffic.mitm', 'HTTPS 解密配置', { enabled: false, hosts: ['*'], bypass_hosts: [], system_trust: false })
+      if (clean[2] === 'pinned') return response('traffic.pinned', '证书固定跳过列表', [])
       return failure('traffic.preview_unavailable', '开发预览不会启用透明抓包或修改规则')
     }
     if (action === 'access') return failure('api.preview_unavailable', '开发预览不提供真实连接凭据')

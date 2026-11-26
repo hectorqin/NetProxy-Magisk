@@ -2,6 +2,7 @@ package traffic
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -128,9 +129,9 @@ func (s *session) serveBridge(bridge *net.UnixConn) {
 	_ = client.SetReadDeadline(now.Add(250 * time.Millisecond))
 	isHTTP := sniffHTTP(client.reader)
 	policy := s.controller.currentMITM()
-	host := ""
-	if !isHTTP && policy != nil {
-		host = sniffTLS(s.ctx, client, metadata)
+	host, reason := "", ""
+	if !isHTTP {
+		host, reason = sniffTLS(s.ctx, client, metadata)
 	}
 	_ = client.SetReadDeadline(time.Time{})
 	if isHTTP {
@@ -138,12 +139,27 @@ func (s *session) serveBridge(bridge *net.UnixConn) {
 		return
 	}
 	entry := metadata.entry(now, "TCP", metadata.Destination)
-	if host != "" && policy.matches(host) {
-		if !policy.bypass(host, now) && s.intercept(client, upstream, metadata, host, policy, now) {
+	if reason == "" {
+		switch {
+		case policy == nil:
+			reason = "decryption_disabled"
+		case matchesHostPatterns(policy.bypassHosts, host):
+			reason = "excluded_host"
+		case !policy.matches(host):
+			reason = "host_not_selected"
+		case s.controller.isPinned(host, metadata.sourceApp):
+			reason = "certificate_rejected"
+			entry.TLS = "pinned_skipped"
+		case s.intercept(client, upstream, metadata, host, policy, now):
 			return
+		default:
+			reason = "decryption_unavailable"
 		}
+	}
+	if entry.TLS == "" && host != "" {
 		entry.TLS = "bypass"
 	}
+	entry.PassthroughReason = reason
 	s.controller.record(s, entry)
 	s.relayStreams(client, upstream)
 }
@@ -176,7 +192,7 @@ func (s *session) serveHTTPStream(client net.Conn, done <-chan struct{}, upstrea
 			}
 			return upstream, nil
 		},
-		TLSClientConfig: upstreamTLS, TLSHandshakeTimeout: 10 * time.Second, DisableKeepAlives: true,
+		TLSClientConfig: upstreamTLS, TLSHandshakeTimeout: 10 * time.Second, DisableKeepAlives: true, DisableCompression: true,
 		ResponseHeaderTimeout: 30 * time.Second, MaxResponseHeaderBytes: 64 << 10,
 	}
 	defer transport.CloseIdleConnections()
@@ -197,16 +213,19 @@ func (s *session) serveHTTPStream(client net.Conn, done <-chan struct{}, upstrea
 				http.Error(w, "Invalid origin request", http.StatusBadRequest)
 				return
 			}
-			if r.Header.Get("Upgrade") != "" {
+			if r.Header.Get("Upgrade") != "" && !webSocketUpgrade(r.Header) {
 				if upstreamTLS != nil {
 					http.Error(w, "HTTPS protocol upgrade is not supported", http.StatusNotImplemented)
 					return
 				}
-				if conn, rw, err := http.NewResponseController(w).Hijack(); err == nil {
+				if err := r.Write(upstream); err != nil {
+					http.Error(w, "Failed to forward protocol upgrade", http.StatusBadGateway)
+					return
+				}
+				conn, reader, err := hijackStream(w)
+				if err == nil {
 					defer conn.Close()
-					if err := r.Write(upstream); err == nil {
-						s.relayStreams(&bufferedStream{Conn: conn, reader: rw.Reader, done: make(chan struct{})}, upstream)
-					}
+					s.relayStreams(&bufferedStream{Conn: conn, reader: reader, done: make(chan struct{})}, upstream)
 				}
 				return
 			}
@@ -225,6 +244,15 @@ func (s *session) serveHTTPStream(client net.Conn, done <-chan struct{}, upstrea
 	}
 	server.SetKeepAlivesEnabled(false)
 	_ = server.Serve(&flowListener{conn: client, done: done})
+}
+
+func hijackStream(w http.ResponseWriter) (net.Conn, *bufio.Reader, error) {
+	conn, rw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	pending, _ := rw.Reader.Peek(rw.Reader.Buffered())
+	return conn, bufio.NewReader(io.MultiReader(bytes.NewReader(bytes.Clone(pending)), conn)), nil
 }
 
 type bufferedStream struct {

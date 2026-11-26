@@ -63,14 +63,19 @@ func (l Layout) TrafficRules() string { return filepath.Join(l.Config(), "traffi
 
 func (l Layout) TrafficSocket() string { return filepath.Join(l.Runtime(), "capture.sock") }
 
+func (l Layout) TrafficHistory() string { return filepath.Join(l.Data(), "traffic-history") }
+
 func (l Layout) TrafficEnabled() string { return filepath.Join(l.Config(), "traffic-enabled.json") }
 func (l Layout) TrafficApps() string    { return filepath.Join(l.Config(), "traffic-apps.json") }
 
 func (l Layout) TrafficCA() string { return filepath.Join(l.Config(), "traffic-ca.pem") }
 
-func (l Layout) TrafficMITM() string { return filepath.Join(l.Config(), "traffic-mitm.json") }
+func (l Layout) TrafficMITM() string   { return filepath.Join(l.Config(), "traffic-mitm.json") }
+func (l Layout) TrafficPinned() string { return filepath.Join(l.Config(), "traffic-pinned.json") }
 
 func (l Layout) TrafficTrust() string { return filepath.Join(l.DevRoot(), "traffic-trust") }
+
+func (l Layout) TrafficUserTrust() string { return filepath.Join(l.Config(), "traffic-user-trust") }
 
 func (l Layout) APITempDir() string { return filepath.Join(l.DevRoot(), "http") }
 

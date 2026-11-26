@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/apiconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
@@ -18,14 +19,15 @@ import (
 func (c *cli) trafficAPI(ctx context.Context, args []string) error {
 	const maxRequest = traffic.MaxRulesBytes + 1024
 	usage := func() error {
-		return usageError("用法: netproxyctl api traffic status|start|stop|toggle|list|detail <ID>|clear|apps|set-apps <文件>|rules|set-rules|mitm|set-mitm|ca|ca-init|ca-export")
+		return usageError("用法: netproxyctl api traffic status|start|stop|toggle|list [批次ID]|page [批次ID [游标]]|batches|delete-batch <ID>|detail <ID>|clear|apps|set-apps <文件>|rules|set-rules <文件>|mitm|set-mitm|pinned|clear-pinned|ca|ca-init|ca-export|ca-remove（规则可选 name 标题，enabled=false 可单独停用）")
 	}
 	if len(args) == 0 {
 		return usage()
 	}
 	action := args[0]
-	withArgument := action == "set-rules" || action == "set-mitm" || action == "set-apps" || action == "ca-export" || action == "detail"
-	if (withArgument && len(args) != 2) || (!withArgument && len(args) != 1) {
+	withArgument := action == "set-rules" || action == "set-mitm" || action == "set-apps" || action == "ca-export" ||
+		action == "detail" || action == "delete-batch" || (action == "list" && len(args) > 1)
+	if (action == "page" && len(args) > 3) || (action != "page" && ((withArgument && len(args) != 2) || (!withArgument && len(args) != 1))) {
 		return usage()
 	}
 	layout := paths.New(c.options.ModuleDir)
@@ -33,14 +35,44 @@ func (c *cli) trafficAPI(ctx context.Context, args []string) error {
 		if err := traffic.RemoveSystemTrust(ctx, layout); err != nil {
 			return err
 		}
-		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "traffic.trust_removed", Message: "系统抓包 CA 已卸载"})
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "traffic.trust_removed", Message: "系统和个人抓包 CA 已卸载"})
 		return nil
 	}
 	var method string
 	var body io.Reader
 	switch action {
-	case "status", "list", "apps", "rules", "mitm", "ca":
+	case "status", "batches", "apps", "rules", "mitm", "pinned", "ca":
 		method = http.MethodGet
+	case "page":
+		method = http.MethodGet
+		query := url.Values{}
+		if len(args) > 1 {
+			if !traffic.ValidRecordID(args[1]) {
+				return usageError("抓包批次 ID 无效")
+			}
+			query.Set("batch", args[1])
+		}
+		if len(args) > 2 {
+			if cursor, err := strconv.ParseUint(args[2], 10, 64); err != nil || cursor == 0 {
+				return usageError("抓包分页游标无效")
+			}
+			query.Set("before", args[2])
+		}
+		if len(query) != 0 {
+			action += "?" + query.Encode()
+		}
+	case "list", "delete-batch":
+		method = http.MethodGet
+		if withArgument {
+			if !traffic.ValidRecordID(args[1]) {
+				return usageError("抓包批次 ID 无效")
+			}
+			if action == "list" {
+				action = "list?batch=" + url.QueryEscape(args[1])
+			} else {
+				method, action = http.MethodDelete, "batches?id="+url.QueryEscape(args[1])
+			}
+		}
 	case "detail":
 		if !traffic.ValidRecordID(args[1]) {
 			return usageError("抓包记录 ID 无效")
@@ -50,6 +82,10 @@ func (c *cli) trafficAPI(ctx context.Context, args []string) error {
 		method = http.MethodPost
 	case "clear":
 		method, action = http.MethodDelete, "list"
+	case "clear-pinned":
+		method, action = http.MethodDelete, "pinned"
+	case "ca-remove":
+		method, action = http.MethodDelete, "ca/trust"
 	case "ca-export":
 		method, action = http.MethodGet, "ca"
 	case "set-rules", "set-mitm", "set-apps":

@@ -1,5 +1,6 @@
 package com.fanjv.netproxy.feature.traffic.data
 
+import android.content.Context
 import com.fanjv.netproxy.core.api.ModuleApiClient
 import com.fanjv.netproxy.core.api.ModuleApiException
 import kotlinx.serialization.SerialName
@@ -7,9 +8,40 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
+import java.io.File
 
 @Serializable
 internal data class CaptureStatus(val running: Boolean, val count: Int)
+
+@Serializable
+internal data class CapturePreview(val running: Boolean, val count: Int, val entries: List<CaptureRecord>)
+
+@Serializable
+internal data class CaptureBatch(
+    val id: String,
+    @SerialName("started_at") val startedAt: String,
+    val count: Int,
+    val running: Boolean,
+)
+
+@Serializable
+internal data class CapturePage(
+    val entries: List<CaptureRecord>,
+    val batch: String? = null,
+    val before: String? = null,
+    val since: String? = null,
+    val oldest: String? = null,
+)
+
+@Serializable
+internal data class CaptureDomain(val host: String, val count: Int)
+
+@Serializable
+internal data class PinnedBypass(
+    val host: String,
+    @SerialName("user_id") val userId: Int,
+    @SerialName("package") val packageName: String,
+)
 
 @Serializable
 internal data class CaptureRecord(
@@ -20,6 +52,7 @@ internal data class CaptureRecord(
     val status: Int,
     val rewrite: String? = null,
     val tls: String? = null,
+    @SerialName("passthrough_reason") val passthroughReason: String? = null,
     @SerialName("duration_ms") val durationMs: Long,
     val id: String? = null,
     val target: String? = null,
@@ -36,7 +69,26 @@ internal data class CaptureSourceApp(
 )
 
 @Serializable
-internal data class CaptureApps(val apps: List<String>)
+internal data class CaptureApps(
+    val apps: List<String> = emptyList(),
+    val mode: String? = null,
+    val blacklist: List<String> = emptyList(),
+    val whitelist: List<String> = apps,
+    @SerialName("disable_quic") val disableQuic: Boolean? = null,
+) {
+    val effectiveMode: String get() = mode ?: if (apps.isEmpty()) "all" else "whitelist"
+    val selected: List<String> get() = when (effectiveMode) {
+        "blacklist" -> blacklist
+        "whitelist" -> whitelist
+        else -> emptyList()
+    }
+
+    fun withSelection(selection: Set<String>): CaptureApps = when (effectiveMode) {
+        "blacklist" -> copy(blacklist = selection.sorted())
+        "whitelist" -> copy(whitelist = selection.sorted())
+        else -> this
+    }
+}
 
 @Serializable
 internal data class CaptureExit(
@@ -61,7 +113,14 @@ internal data class CapturedHttp(
     val request: CapturedMessage,
     val response: CapturedMessage,
     val rewrites: List<RewriteMatch> = emptyList(),
+    val websocket: WebSocketDetail? = null,
 )
+
+@Serializable
+internal data class WebSocketDetail(val frames: List<WebSocketFrame>, val truncated: Boolean)
+
+@Serializable
+internal data class WebSocketFrame(val direction: String, val opcode: Int, val size: Long, val text: String? = null, val truncated: Boolean)
 
 @Serializable
 internal data class RewriteMatch(
@@ -106,10 +165,21 @@ internal data class CapturedBody(
     val truncated: Boolean,
     val size: Long? = null,
     @SerialName("captured_size") val capturedSize: Int? = null,
+    val decoded: Boolean = false,
+    val blob: Boolean = false,
+    @SerialName("content_range") val contentRange: String? = null,
+    val filename: String? = null,
 )
 
 @Serializable
-internal data class RewriteRule(val pattern: String, val phase: String, val script: String)
+internal data class RewriteRule(
+    val pattern: String,
+    val phase: String,
+    val script: String,
+    val domains: List<String> = emptyList(),
+    val enabled: Boolean = true,
+    val name: String = "",
+)
 
 @Serializable
 private data class RewriteRules(val rules: List<RewriteRule>)
@@ -119,6 +189,7 @@ internal data class MitmPolicy(
     val enabled: Boolean,
     val hosts: List<String>,
     @SerialName("system_trust") val systemTrust: Boolean,
+    @SerialName("bypass_hosts") val bypassHosts: List<String> = emptyList(),
 )
 
 @Serializable
@@ -130,25 +201,63 @@ internal data class CaptureCertificate(val pem: String, val filename: String, va
                 .matches(pem.trim())
 }
 
-internal class TrafficRepository(private val api: ModuleApiClient) {
+internal class TrafficRepository(private val api: ModuleApiClient, private val cache: CapturePageCache? = null) {
+    constructor(api: ModuleApiClient, context: Context) :
+        this(api, CapturePageCache(File(context.applicationContext.cacheDir, "traffic-pages"), api.json))
+
     suspend fun status(): CaptureStatus = api.read("/traffic/status")
-    suspend fun records(): List<CaptureRecord> = api.read("/traffic/list")
+    suspend fun preview(): CapturePreview = api.read("/traffic/preview")
+    suspend fun records(batch: String? = null): List<CaptureRecord> =
+        api.read("/traffic/list", if (batch == null) emptyMap() else mapOf("batch" to batch))
+    suspend fun page(batch: String? = null, before: String? = null, since: String? = null, oldest: String? = null,
+        host: String? = null): CapturePage {
+        if (host == null && batch != null && before != null && oldest != null) {
+            cache?.read(batch, oldest, before)?.let { return it }
+        }
+        val page = api.read<CapturePage>("/traffic/page", buildMap {
+            batch?.let { put("batch", it) }
+            before?.let { put("before", it) }
+            since?.let { put("since", it) }
+            host?.let { put("host", it) }
+        })
+        if (host == null && batch != null && before != null && page.batch == batch && page.oldest != null) {
+            cache?.write(batch, page.oldest, before, page)
+        }
+        return page
+    }
+    suspend fun domains(batch: String? = null): List<CaptureDomain> =
+        api.read("/traffic/domains", if (batch == null) emptyMap() else mapOf("batch" to batch))
+    suspend fun batches(): List<CaptureBatch> = api.read<List<CaptureBatch>>("/traffic/batches").also { batches ->
+        cache?.retain(batches.mapTo(mutableSetOf()) { it.id })
+    }
+    suspend fun deleteBatch(id: String) {
+        api.delete("/traffic/batches", mapOf("id" to id))
+        cache?.invalidate(id)
+    }
     suspend fun detail(id: String): CaptureDetail = api.read("/traffic/detail", mapOf("id" to id))
+    suspend fun downloadBody(id: String, side: String, destination: File, size: Int) {
+        api.download("/traffic/body", mapOf("id" to id, "side" to side), destination)
+        require(destination.length() == size.toLong())
+    }
     suspend fun rules(): List<RewriteRule> = api.read<RewriteRules>("/traffic/rules").rules
     suspend fun policy(): MitmPolicy = api.read("/traffic/mitm")
+    suspend fun pinned(): List<PinnedBypass> = api.read("/traffic/pinned")
+    suspend fun clearPinned(): List<PinnedBypass> = api.json.decodeFromJsonElement(api.delete("/traffic/pinned").data)
     suspend fun apps(): CaptureApps = api.captureApps()
-    suspend fun saveApps(apps: List<String>): CaptureApps =
-        api.json.decodeFromJsonElement(api.saveCaptureApps(api.json.encodeToJsonElement(CaptureApps(apps)).jsonObject).data)
+    suspend fun saveApps(policy: CaptureApps): CaptureApps = api.json.decodeFromJsonElement(
+        api.saveCaptureApps(api.json.encodeToJsonElement(policy.copy(apps = emptyList(), mode = policy.effectiveMode)).jsonObject).data,
+    )
 
     suspend fun setCapture(enabled: Boolean): CaptureStatus =
         api.json.decodeFromJsonElement(api.post(if (enabled) "/traffic/start" else "/traffic/stop").data)
 
-    suspend fun clear(): CaptureStatus = api.json.decodeFromJsonElement(api.delete("/traffic/list").data)
+    suspend fun clear(): CaptureStatus =
+        api.json.decodeFromJsonElement<CaptureStatus>(api.delete("/traffic/list").data).also { cache?.invalidate() }
 
     suspend fun saveRules(expected: List<RewriteRule>, updated: List<RewriteRule>): List<RewriteRule> {
         if (rules() != expected) throw TrafficChangedException()
         api.put("/traffic/rules", api.json.encodeToJsonElement(RewriteRules(updated)).jsonObject)
-        return updated
+        return rules()
     }
 
     suspend fun savePolicy(expected: MitmPolicy, updated: MitmPolicy): MitmPolicy {
@@ -157,8 +266,12 @@ internal class TrafficRepository(private val api: ModuleApiClient) {
     }
 
     fun persistedPolicy(error: ModuleApiException): MitmPolicy? {
-        if (error.resultCode != "traffic.trust_remove_incomplete") return null
+        if (error.resultCode != "traffic.trust_remove_incomplete" && error.resultCode != "traffic.user_trust_incomplete") return null
         return runCatching { api.json.decodeFromJsonElement<MitmPolicy>(error.data) }.getOrNull()
+    }
+
+    suspend fun removeUserCertificate() {
+        api.delete("/traffic/ca/trust")
     }
 
     suspend fun certificate(initialize: Boolean = true): CaptureCertificate {
