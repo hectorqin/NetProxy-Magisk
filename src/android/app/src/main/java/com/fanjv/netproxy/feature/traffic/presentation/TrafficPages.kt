@@ -30,7 +30,12 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.List
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.NetworkCheck
+import androidx.compose.material.icons.rounded.PauseCircle
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
+import androidx.compose.material.icons.rounded.RadioButtonChecked
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.TrackChanges
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -74,6 +79,7 @@ import com.fanjv.netproxy.feature.apps.presentation.AppInfoModel
 import com.fanjv.netproxy.feature.apps.presentation.AppIcon
 import com.fanjv.netproxy.feature.traffic.data.CaptureRecord
 import com.fanjv.netproxy.feature.traffic.data.TrafficChangedException
+import com.fanjv.netproxy.feature.traffic.data.responseTypeQuery
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route
 import kotlinx.coroutines.delay
@@ -152,6 +158,7 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                         }),
                         checked = status?.running == true, enabled = status != null && !state.busy,
                         onCheckedChange = viewModel::setCapture, insideMargin = TrafficRowInsets,
+                        startAction = { CaptureRowIcon(Icons.Rounded.RadioButtonChecked) },
                     )
                     SwitchPreference(
                         title = stringResource(R.string.traffic_disable_quic),
@@ -159,6 +166,7 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                         checked = state.captureAppPolicy?.disableQuic == true,
                         enabled = state.captureAppPolicy?.disableQuic != null && !state.busy,
                         onCheckedChange = viewModel::setCaptureDisableQuic, insideMargin = TrafficRowInsets,
+                        startAction = { CaptureRowIcon(Icons.Rounded.NetworkCheck) },
                     )
                     CaptureOverlayPreference(status?.running == true)
                     Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
@@ -184,10 +192,7 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                         summary = stringResource(R.string.traffic_capture_apps_summary),
                         onClick = { navigator.push(Route.TrafficApps) }, enabled = !state.busy,
                         insideMargin = TrafficRowInsets,
-                        startAction = {
-                            Icon(Icons.Rounded.Android, null, Modifier.padding(end = 12.dp),
-                                tint = MiuixTheme.colorScheme.primary)
-                        })
+                        startAction = { CaptureRowIcon(Icons.Rounded.Android) })
                 },
                 CardItem("rules") {
                     TrafficLink(R.string.traffic_rules, R.string.traffic_rules_summary, Icons.Rounded.Code) {
@@ -196,12 +201,14 @@ internal fun TrafficScreen(viewModel: TrafficViewModel) {
                 },
                 CardItem("breakpoints") {
                     ArrowPreference(title = stringResource(R.string.traffic_breakpoints),
-                        onClick = { navigator.push(Route.TrafficBreakpoints) }, insideMargin = TrafficRowInsets)
+                        onClick = { navigator.push(Route.TrafficBreakpoints) }, insideMargin = TrafficRowInsets,
+                        startAction = { CaptureRowIcon(Icons.Rounded.TrackChanges) })
                 },
                 CardItem("paused") {
                     val count = pauses?.getOrNull()?.size ?: 0
                     ArrowPreference(title = if (count > 0) pausedCountLabel(count) else stringResource(R.string.traffic_breakpoints_paused),
-                        onClick = { navigator.push(Route.TrafficPaused) }, insideMargin = TrafficRowInsets)
+                        onClick = { navigator.push(Route.TrafficPaused) }, insideMargin = TrafficRowInsets,
+                        startAction = { CaptureRowIcon(Icons.Rounded.PauseCircle) })
                 },
                 CardItem("https") {
                     TrafficLink(R.string.traffic_https, R.string.traffic_ca_hint, Icons.Rounded.Lock) {
@@ -236,10 +243,12 @@ private fun CaptureOverlayPreference(capturing: Boolean) {
             enabled = it
         },
         insideMargin = TrafficRowInsets,
+        startAction = { CaptureRowIcon(Icons.Rounded.PictureInPictureAlt) },
     )
     if (enabled && !granted) {
         ArrowPreference(title = stringResource(R.string.traffic_overlay_permission),
-            onClick = { explain = true }, insideMargin = TrafficRowInsets)
+            onClick = { explain = true }, insideMargin = TrafficRowInsets,
+            startAction = { CaptureRowIcon(Icons.Rounded.PictureInPictureAlt) })
     }
     AppDialog(
         show = explain && enabled && !granted,
@@ -262,7 +271,12 @@ private fun CaptureOverlayPreference(capturing: Boolean) {
 private fun TrafficLink(title: Int, summary: Int, icon: ImageVector, onClick: () -> Unit) {
     ArrowPreference(title = stringResource(title), summary = stringResource(summary), onClick = onClick,
         insideMargin = TrafficRowInsets,
-        startAction = { Icon(icon, null, Modifier.padding(end = 12.dp), tint = MiuixTheme.colorScheme.primary) })
+        startAction = { CaptureRowIcon(icon) })
+}
+
+@Composable
+internal fun CaptureRowIcon(icon: ImageVector) {
+    Icon(icon, null, Modifier.padding(end = 12.dp), tint = MiuixTheme.colorScheme.primary)
 }
 
 internal val TrafficRowInsets = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
@@ -281,12 +295,14 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
     var confirmClear by rememberSaveable { mutableStateOf(false) }
     var deleteBatch by rememberSaveable { mutableStateOf<String?>(null) }
     var showDomains by rememberSaveable { mutableStateOf(false) }
+    var showResponseTypes by rememberSaveable { mutableStateOf(false) }
     var grouping by rememberSaveable { mutableStateOf(SessionGrouping.None) }
     var collapsed by remember(grouping) { mutableStateOf(emptySet<String>()) }
     val records = state.records.value.orEmpty()
     val historical = state.batches.value.orEmpty().filterNot { it.running }
     val batchLabels = historical.map {
-        "${it.id.take(6)} · ${it.startedAt.substringBefore('.').substringBefore('Z').replace('T', ' ')} UTC · " +
+        val name = if (it.imported) stringResource(R.string.traffic_har_read_only, it.name.orEmpty()) else it.id.take(6)
+        "$name · ${it.startedAt.substringBefore('.').substringBefore('Z').replace('T', ' ')} UTC · " +
             stringResource(R.string.traffic_record_count, it.count)
     }
     LaunchedEffect(viewModel) { viewModel.loadAppCatalog() }
@@ -303,7 +319,7 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
         records.filter { it.matchesSession(query, method, statusClass, tls, rewrittenOnly, app, outbound) }
     }
     val groups = remember(visible, grouping) { visible.groupSessions(grouping) }
-    val listState = key(state.selectedBatch, state.selectedDomain) { rememberLazyListState() }
+    val listState = key(state.selectedBatch, state.selectedDomain, state.selectedResponseTypes) { rememberLazyListState() }
     val before = state.page?.before
     val running = state.status.value?.running == true
     LaunchedEffect(listState, before, visible.isNotEmpty(), state.busy, state.loadingOlder, state.olderError) {
@@ -340,7 +356,20 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
             (records.isNotEmpty() || state.batches.value.orEmpty().any { it.count > 0 } ||
                 (state.status.value?.count ?: 0) > 0 || historical.isNotEmpty()) && !state.busy) { confirmClear = true },
     )
-    TopBarMoreMenu(groupingActions + batchActions, stringResource(R.string.more_options)) { menu ->
+    val archiveActions = trafficArchiveActions(viewModel,
+        batch = (state.selectedBatch ?: state.page?.batch)?.let { mapOf("batch" to it) }.orEmpty(),
+        filters = buildMap {
+            state.selectedDomain?.let { put("host", it) }
+            putAll(state.selectedResponseTypes.responseTypeQuery())
+            query.trim().takeIf { it.isNotEmpty() }?.let { put("query", it) }
+            method?.let { put("method", it) }
+            statusClass?.let { put("status_class", it.toString()) }
+            tls?.let { put("tls", it) }
+            if (rewrittenOnly) put("rewritten", "true")
+            app?.let { put("app", it) }
+            outbound?.let { put("outbound", it) }
+        }, enabled = !state.busy)
+    TopBarMoreMenu(groupingActions + batchActions + archiveActions, stringResource(R.string.more_options)) { menu ->
         TrafficFrame(R.string.traffic_records, stringResource(R.string.traffic_record_count, records.size),
             actions = {
                 AppBarButton(viewModel::refresh, !state.busy) { Icon(Icons.Rounded.Refresh, stringResource(R.string.traffic_refresh)) }
@@ -359,6 +388,12 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
                     FilterChip("$domainLabel ▾", state.selectedDomain != null, Modifier.clickable(enabled = !state.busy) {
                         showDomains = true
                     })
+                    val typesSelected = state.selectedResponseTypes.isNotEmpty()
+                    val typeLabel = if (typesSelected) stringResource(R.string.traffic_response_type_selected, state.selectedResponseTypes.size)
+                        else stringResource(R.string.traffic_response_type_filter)
+                    FilterChip("$typeLabel ▾", typesSelected, Modifier.clickable(enabled = !state.busy) {
+                        showResponseTypes = true
+                    })
                     FilterDropdown(R.string.traffic_method, methods, method) { method = it }
                     FilterDropdown(R.string.traffic_http_status, (1..5).map { "${it}xx" }, statusClass?.let { "${it}xx" }) {
                         statusClass = it?.firstOrNull()?.digitToInt()
@@ -374,7 +409,8 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
                 val issue = state.records.error ?: state.failure
                 if (visible.isEmpty() && before == null) ContentStatus(PaddingValues(0.dp), when {
                     issue != null -> trafficError(issue, R.string.traffic_read_failed)
-                    records.isNotEmpty() || state.selectedDomain != null -> stringResource(R.string.traffic_no_matches)
+                    records.isNotEmpty() || state.selectedDomain != null || state.selectedResponseTypes.isNotEmpty() ->
+                        stringResource(R.string.traffic_no_matches)
                     else -> stringResource(R.string.traffic_empty)
                 }, loading = state.loading)
                 else LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
@@ -415,6 +451,8 @@ internal fun TrafficSessionsScreen(viewModel: TrafficViewModel) {
     }
     if (showDomains) CaptureDomainPicker(viewModel, state.page?.batch ?: state.selectedBatch, state.selectedDomain,
         allowAll = true, onDismiss = { showDomains = false }, choose = viewModel::selectDomain)
+    if (showResponseTypes) CaptureResponseTypePicker(viewModel, state.page?.batch ?: state.selectedBatch, state.selectedDomain,
+        state.selectedResponseTypes, onDismiss = { showResponseTypes = false }, choose = viewModel::selectResponseTypes)
     TrafficConfirmation(confirmClear, R.string.traffic_clear, R.string.traffic_clear_prompt,
         { confirmClear = false }, { confirmClear = false; viewModel.clear() })
     TrafficConfirmation(deleteBatch != null, R.string.traffic_delete_batch, R.string.traffic_delete_batch_prompt,
@@ -576,7 +614,6 @@ internal fun trafficError(error: Throwable, fallback: Int): String = when (error
         "traffic.replay_route_failed" -> stringResource(R.string.traffic_replay_route_failed)
         "traffic.replay_invalid" -> stringResource(R.string.traffic_replay_invalid)
         "traffic.breakpoint_gone" -> stringResource(R.string.traffic_breakpoint_gone)
-        "traffic.breakpoint_edit_invalid", "traffic.breakpoints_invalid" -> stringResource(R.string.traffic_breakpoint_invalid)
         "traffic.replay_response_failed" -> stringResource(R.string.traffic_replay_failed)
         else -> stringResource(R.string.traffic_api_error, stringResource(fallback), error.resultCode, error.message)
     }

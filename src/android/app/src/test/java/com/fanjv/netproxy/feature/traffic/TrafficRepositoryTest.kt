@@ -7,6 +7,7 @@ import com.fanjv.netproxy.core.api.TestApiTransport
 import com.fanjv.netproxy.core.api.apiSuccess
 import com.fanjv.netproxy.feature.traffic.data.CaptureBreakpointConfig
 import com.fanjv.netproxy.feature.traffic.data.CaptureBreakpointEdit
+import com.fanjv.netproxy.feature.traffic.data.CaptureBreakpointRule
 import com.fanjv.netproxy.feature.traffic.data.CapturePageCache
 import com.fanjv.netproxy.feature.traffic.data.CaptureReplayEdit
 import com.fanjv.netproxy.feature.traffic.data.MitmPolicy
@@ -26,6 +27,19 @@ import org.junit.rules.TemporaryFolder
 class TrafficRepositoryTest {
     @get:Rule val cacheDir = TemporaryFolder()
 
+    @Test fun deletingOneBypassSendsHostAndAppReference() = runBlocking {
+        val called = mutableListOf<String>()
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("DELETE", request.method)
+            assertEquals(mapOf("host" to "example.test", "app" to "10:test.example"), request.query)
+            called += request.path
+            apiSuccess("[]")
+        }))
+        assertTrue(repository.removePinned("example.test", "10:test.example").isEmpty())
+        assertTrue(repository.removeAlpnBypass("example.test", "10:test.example").isEmpty())
+        assertEquals(listOf("/traffic/pinned", "/traffic/alpn-bypasses"), called)
+    }
+
     @Test fun clearingLastBreakpointSendsEmptyRulesArray() = runBlocking {
         val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
             assertEquals("/traffic/breakpoints", request.path)
@@ -34,6 +48,18 @@ class TrafficRepositoryTest {
             apiSuccess("""{"timeout_seconds":60,"rules":[]}""")
         }))
         repository.saveBreakpoints(CaptureBreakpointConfig(rules = emptyList()))
+    }
+
+    @Test fun savingBreakpointIncludesDefaultRequestPhase() = runBlocking {
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("/traffic/breakpoints", request.path)
+            assertEquals("PUT", request.method)
+            assertEquals(Json.parseToJsonElement("""{"rules":[{"domains":["breakpoint.example.test"],"pattern":"/fixture","phase":"request"}]}"""), request.body)
+            apiSuccess("{}")
+        }))
+        repository.saveBreakpoints(CaptureBreakpointConfig(
+            rules = listOf(CaptureBreakpointRule(domains = listOf("breakpoint.example.test"), pattern = "/fixture"))
+        ))
     }
 
     @Test fun readsPausedResponseAndPostsOnlyEditedFields() = runBlocking {
@@ -121,6 +147,38 @@ class TrafficRepositoryTest {
         repository.page(batch, before = "3", oldest = "1", host = "example.test")
         repository.page(batch, before = "3", oldest = "1")
         assertEquals(2, pages)
+    }
+
+    @Test fun responseTypesUseBatchAndDomainAndFilteredPagesBypassUnfilteredCache() = runBlocking {
+        val batch = "A".repeat(26)
+        val cache = CapturePageCache(cacheDir.root, Json)
+        var pages = 0
+        val repository = TrafficRepository(ModuleApiClient(TestApiTransport { request ->
+            when (request.path) {
+                "/traffic/response-types" -> {
+                    assertEquals(mapOf("batch" to batch, "host" to "example.test"), request.query)
+                    apiSuccess("""[{"type":"image","count":2}]""")
+                }
+                "/traffic/page" -> {
+                    pages++
+                    val filters = when (pages) {
+                        2 -> mapOf("response_types" to "image,json")
+                        3 -> mapOf("response_types" to "image,json", "host" to "example.test")
+                        else -> emptyMap()
+                    }
+                    assertEquals(mapOf("batch" to batch, "before" to "3") + filters, request.query)
+                    apiSuccess("""{"entries":[],"batch":"$batch","oldest":"1"}""")
+                }
+                else -> error("Unexpected request ${request.path}")
+            }
+        }), cache)
+        assertEquals(2, repository.responseTypes(batch, "example.test").single().count)
+        repository.page(batch, before = "3", oldest = "1")
+        val selected = setOf("json", "image")
+        repository.page(batch, before = "3", oldest = "1", responseTypes = selected)
+        repository.page(batch, before = "3", oldest = "1", host = "example.test", responseTypes = selected)
+        repository.page(batch, before = "3", oldest = "1")
+        assertEquals(3, pages)
     }
 
     @Test fun rewriteRulesDefaultToEnabledAndPersistExplicitDisable() = runBlocking {

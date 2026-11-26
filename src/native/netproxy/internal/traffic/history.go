@@ -35,15 +35,18 @@ type Batch struct {
 	Running   bool       `json:"running"`
 	Count     int        `json:"count"`
 	Size      int64      `json:"size"`
+	Name      string     `json:"name,omitempty"`
+	Imported  bool       `json:"imported,omitempty"`
 }
 
 type savedRecord struct {
-	name      string
-	id        string
-	host      string
-	size      int64
-	sequence  uint64
-	mediaSize int64
+	name         string
+	id           string
+	host         string
+	size         int64
+	sequence     uint64
+	mediaSize    int64
+	responseType int
 }
 
 type savedBatch struct {
@@ -118,6 +121,7 @@ func openHistory(layout paths.Layout) *historyStore {
 				continue
 			}
 			saved.host = historyHost(record.Host)
+			saved.responseType = responseBodyType(record)
 			for _, side := range []string{"request", "response"} {
 				if body := bodyFor(record, side); body != nil && body.Blob {
 					blobs[mediaName(id, side)] = true
@@ -314,7 +318,7 @@ func (h *historyStore) appendPending(batch *savedBatch, pending pendingRecord) e
 	if err := provider.WriteAtomic(h.path(batch.ID, name), data, 0o600); err != nil {
 		return err
 	}
-	batch.records = append(batch.records, savedRecord{name, record.ID, historyHost(record.Host), size, batch.sequence, mediaSize})
+	batch.records = append(batch.records, savedRecord{name, record.ID, historyHost(record.Host), size, batch.sequence, mediaSize, responseBodyType(record)})
 	batch.Count++
 	batch.Size += size + mediaSize
 	batch.mediaSize += mediaSize
@@ -347,7 +351,7 @@ func (h *historyStore) prune(active *savedBatch, incoming int64, count int) erro
 	}
 	for i := 0; i < len(h.batches) && (len(h.batches) > historyBatchLimit || total > h.byteLimit || count > historyCountLimit); {
 		batch := h.batches[i]
-		if batch == active {
+		if batch == active || batch.Running {
 			i++
 			continue
 		}
@@ -440,13 +444,26 @@ type PageRequest struct {
 	Before, Since uint64
 	Incremental   bool
 	Limit         int
+	ResponseTypes ResponseTypes
 }
 
 func (c *Controller) HistoryPage(request PageRequest) (HistoryPage, bool) {
 	if c.history == nil {
 		return HistoryPage{Entries: []Entry{}}, request.Batch == ""
 	}
+	if request.Batch == "" {
+		request.Batch = c.activeHistoryBatch()
+	}
 	return c.history.page(request)
+}
+
+func (c *Controller) activeHistoryBatch() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session != nil && c.batch != nil {
+		return c.batch.ID
+	}
+	return ""
 }
 
 func (h *historyStore) page(request PageRequest) (HistoryPage, bool) {
@@ -465,11 +482,12 @@ func (h *historyStore) page(request PageRequest) (HistoryPage, bool) {
 		limit := min(MaxHistoryPage, max(1, request.Limit))
 		page.Oldest = strconv.FormatUint(batch.records[0].sequence, 10)
 		records := batch.records
-		if request.Host != "" {
+		filtered := request.Host != "" || request.ResponseTypes != 0
+		if filtered {
 			host := historyHost(request.Host)
 			records = nil
 			for _, record := range batch.records {
-				if record.host == host {
+				if (host == "" || record.host == host) && request.ResponseTypes.matches(record.responseType) {
 					records = append(records, record)
 				}
 			}
@@ -490,7 +508,7 @@ func (h *historyStore) page(request PageRequest) (HistoryPage, bool) {
 				page.Before = strconv.FormatUint(records[low].sequence, 10)
 			}
 		}
-		if request.Host != "" && request.Before == 0 && high == len(records) {
+		if filtered && request.Before == 0 && high == len(records) {
 			page.Since = strconv.FormatUint(batch.records[len(batch.records)-1].sequence, 10)
 		} else if high > 0 {
 			page.Since = strconv.FormatUint(records[high-1].sequence, 10)
@@ -513,6 +531,9 @@ type CaptureDomain struct {
 func (c *Controller) HistoryDomains(id string) ([]CaptureDomain, bool) {
 	if c.history == nil {
 		return []CaptureDomain{}, id == ""
+	}
+	if id == "" {
+		id = c.activeHistoryBatch()
 	}
 	return c.history.domains(id)
 }

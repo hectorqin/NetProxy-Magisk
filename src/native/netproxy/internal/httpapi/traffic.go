@@ -19,6 +19,7 @@ const trafficRoute = "/api/v1/traffic/"
 
 func (s *Server) registerTraffic() {
 	s.registerBreakpointRoutes()
+	s.registerHARRoutes()
 	s.mux.HandleFunc("GET "+trafficRoute+"body", s.readTrafficBody)
 	s.trafficRoute("GET", "status", "抓包状态", func(context.Context) (any, error) {
 		return s.traffic.Status(), nil
@@ -68,12 +69,31 @@ func (s *Server) registerTraffic() {
 		}
 		return contract.Success("traffic.domains", "抓包域名统计", domains), nil
 	})
-	s.route("GET "+trafficRoute+"page", 10*time.Second, false, func(_ context.Context, r *http.Request) (contract.Result, error) {
-		query, err := resourceQuery(r, "batch", "limit", "before", "after", "since", "host")
+	s.route("GET "+trafficRoute+"response-types", 10*time.Second, false, func(_ context.Context, r *http.Request) (contract.Result, error) {
+		query, err := resourceQuery(r, "batch", "host")
 		if err != nil {
 			return contract.Result{}, err
 		}
-		request := traffic.PageRequest{Batch: query.Get("batch"), Host: query.Get("host"), Limit: 50}
+		id := query.Get("batch")
+		if query.Has("batch") && !traffic.ValidRecordID(id) {
+			return contract.Result{}, invalid("抓包批次 ID 无效")
+		}
+		types, ok := s.traffic.HistoryResponseTypes(id, query.Get("host"))
+		if !ok {
+			return contract.Result{}, captureBatchNotFound()
+		}
+		return contract.Success("traffic.response_types", "抓包响应体类型统计", types), nil
+	})
+	s.route("GET "+trafficRoute+"page", 10*time.Second, false, func(_ context.Context, r *http.Request) (contract.Result, error) {
+		query, err := resourceQuery(r, "batch", "limit", "before", "after", "since", "host", "response_types")
+		if err != nil {
+			return contract.Result{}, err
+		}
+		types, ok := traffic.ParseResponseTypes(query.Get("response_types"))
+		if !ok || query.Has("response_types") && types == 0 {
+			return contract.Result{}, invalid("响应体类型（response_types）无效")
+		}
+		request := traffic.PageRequest{Batch: query.Get("batch"), Host: query.Get("host"), Limit: 50, ResponseTypes: types}
 		if query.Has("batch") && !traffic.ValidRecordID(request.Batch) {
 			return contract.Result{}, invalid("抓包批次 ID 无效")
 		}
@@ -242,8 +262,13 @@ func (s *Server) registerTraffic() {
 		return entries, mitmAPIError("traffic.pinned_unavailable", err)
 	})
 	s.route("DELETE "+trafficRoute+"pinned", 10*time.Second, false, func(_ context.Context, r *http.Request) (contract.Result, error) {
-		if err := resourceEmptyRequest(r); err != nil {
+		host, app, err := bypassDeleteQuery(r)
+		if err != nil {
 			return contract.Result{}, err
+		}
+		if host != "" {
+			entries, err := s.traffic.RemovePinnedBypass(host, app)
+			return contract.Success("traffic.pinned_removed", "已删除证书固定跳过条目", entries), bypassDeleteError("traffic.pinned_clear_failed", err)
 		}
 		entries, err := s.traffic.ClearPinnedBypasses()
 		return contract.Success("traffic.pinned_cleared", "已清除证书固定跳过列表", entries), mitmAPIError("traffic.pinned_clear_failed", err)
@@ -253,8 +278,13 @@ func (s *Server) registerTraffic() {
 		return entries, mitmAPIError("traffic.alpn_bypasses_unavailable", err)
 	})
 	s.route("DELETE "+trafficRoute+"alpn-bypasses", 10*time.Second, false, func(_ context.Context, r *http.Request) (contract.Result, error) {
-		if err := resourceEmptyRequest(r); err != nil {
+		host, app, err := bypassDeleteQuery(r)
+		if err != nil {
 			return contract.Result{}, err
+		}
+		if host != "" {
+			entries, err := s.traffic.RemoveALPNBypass(host, app)
+			return contract.Success("traffic.alpn_bypass_removed", "已删除 ALPN 临时跳过条目", entries), bypassDeleteError("traffic.alpn_bypasses_clear_failed", err)
 		}
 		entries, err := s.traffic.ClearALPNBypasses()
 		return contract.Success("traffic.alpn_bypasses_cleared", "已清除 ALPN 临时跳过列表", entries), mitmAPIError("traffic.alpn_bypasses_clear_failed", err)
@@ -294,6 +324,25 @@ func (s *Server) registerTraffic() {
 		}
 		return contract.Success("traffic.mitm_saved", "HTTPS 抓包配置已保存", policy), nil
 	})
+}
+
+func bypassDeleteQuery(r *http.Request) (host, app string, err error) {
+	query, err := resourceQuery(r, "host", "app")
+	if err != nil {
+		return "", "", err
+	}
+	host, app = query.Get("host"), query.Get("app")
+	if len(query) != 0 && (host == "" || app == "") {
+		return "", "", invalid("必须同时指定跳过条目的域名和应用")
+	}
+	return host, app, resourceEmptyBody(r)
+}
+
+func bypassDeleteError(code string, err error) error {
+	if errors.Is(err, traffic.ErrBypassKey) {
+		return invalid(err.Error())
+	}
+	return mitmAPIError(code, err)
 }
 
 func (s *Server) readTrafficBody(w http.ResponseWriter, r *http.Request) {

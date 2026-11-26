@@ -62,6 +62,7 @@ internal data class TrafficState(
     val batches: TrafficContent<List<CaptureBatch>> = TrafficContent(),
     val selectedBatch: String? = null,
     val selectedDomain: String? = null,
+    val selectedResponseTypes: Set<String> = emptySet(),
     val page: CapturePage? = null,
     val loadingOlder: Boolean = false,
     val olderError: Throwable? = null,
@@ -100,6 +101,7 @@ internal class TrafficViewModel(
         repository.downloadBody(id, side, destination, size)
 
     suspend fun capturedDomains(batch: String?) = repository.domains(batch)
+    suspend fun capturedResponseTypes(batch: String?, host: String?) = repository.responseTypes(batch, host)
 
     private val _state = MutableStateFlow(TrafficState())
     val state = _state.asStateFlow()
@@ -111,6 +113,18 @@ internal class TrafficViewModel(
 
     suspend fun replay(id: String, edit: CaptureReplayEdit?) =
         repository.replay(id, edit)
+
+    suspend fun exportHAR(query: Map<String, String>, destination: File) = repository.exportHAR(query, destination)
+
+    suspend fun importHAR(name: String, source: File) {
+        val batch = repository.importHAR(name, source)
+        val head = attempt { captureHead(batch.id, host = null, responseTypes = emptySet()) }
+        val batches = attempt { repository.batches() }
+        _state.update {
+            applyHead(it.copy(page = null, records = TrafficContent()), head).copy(selectedBatch = batch.id,
+                selectedDomain = null, selectedResponseTypes = emptySet(), batches = it.batches.refreshed(batches))
+        }
+    }
 
     fun openRecord(record: CaptureRecord) {
         detailJob?.cancel()
@@ -203,6 +217,14 @@ internal class TrafficViewModel(
         }
     }
 
+    fun selectResponseTypes(types: Set<String>) {
+        if (types == state.value.selectedResponseTypes) return
+        mutate {
+            val head = captureHead(state.value.selectedBatch, responseTypes = types)
+            _state.update { applyHead(it.copy(page = null), Result.success(head)).copy(selectedResponseTypes = types) }
+        }
+    }
+
     fun deleteBatch(id: String) = mutate {
         repository.deleteBatch(id)
         val batches = attempt { repository.batches() }
@@ -219,7 +241,8 @@ internal class TrafficViewModel(
         _state.update { it.copy(loadingOlder = true, olderError = null) }
         olderJob = viewModelScope.launch {
             val result = attempt {
-                val older = repository.page(batch = page.batch, before = before, oldest = page.oldest, host = current.selectedDomain)
+                val older = repository.page(batch = page.batch, before = before, oldest = page.oldest,
+                    host = current.selectedDomain, responseTypes = current.selectedResponseTypes)
                 if (older.oldest != page.oldest) captureHead(current.selectedBatch) to true else older to false
             }
             _state.update { latest ->
@@ -246,7 +269,9 @@ internal class TrafficViewModel(
             current.status.value?.running != true || pollJob?.isActive == true) return
         val previous = current.page ?: return
         pollJob = viewModelScope.launch {
-            val update = attempt { repository.page(since = previous.since, host = current.selectedDomain) }.getOrNull() ?: return@launch
+            val update = attempt {
+                repository.page(since = previous.since, host = current.selectedDomain, responseTypes = current.selectedResponseTypes)
+            }.getOrNull() ?: return@launch
             val reset = previous.since == null || previous.batch != update.batch || previous.oldest != update.oldest
             val head = if (reset && previous.since != null) attempt { captureHead() }.getOrNull() ?: return@launch else update
             _state.update { latest ->
@@ -260,10 +285,11 @@ internal class TrafficViewModel(
         }
     }
 
-    private suspend fun captureHead(id: String? = null, host: String? = state.value.selectedDomain): CapturePage = try {
-        repository.page(batch = id, host = host)
+    private suspend fun captureHead(id: String? = null, host: String? = state.value.selectedDomain,
+        responseTypes: Set<String> = state.value.selectedResponseTypes): CapturePage = try {
+        repository.page(batch = id, host = host, responseTypes = responseTypes)
     } catch (error: ModuleApiException) {
-        if (host != null || error.resultCode != "api.not_found") throw error
+        if (host != null || responseTypes.isNotEmpty() || error.resultCode != "api.not_found") throw error
         CapturePage(repository.records(id), batch = id)
     }
 
@@ -310,6 +336,16 @@ internal class TrafficViewModel(
     fun clearAlpnBypasses() = mutate {
         val entries = repository.clearAlpnBypasses()
         _state.update { it.copy(alpnBypasses = TrafficContent(entries)) }
+    }
+
+    fun removeBypass(host: String, app: String, alpn: Boolean) = mutate {
+        if (alpn) {
+            val entries = repository.removeAlpnBypass(host, app)
+            _state.update { it.copy(alpnBypasses = TrafficContent(entries)) }
+        } else {
+            val entries = repository.removePinned(host, app)
+            _state.update { it.copy(pinned = TrafficContent(entries)) }
+        }
     }
 
     fun setCaptureDisableQuic(disabled: Boolean) = mutate {
